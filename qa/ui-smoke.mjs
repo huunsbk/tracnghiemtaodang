@@ -34,6 +34,18 @@ const importedSettings = {
 };
 
 const state = {
+  profile: {
+    user_id: 'qa-user',
+    email: 'qa@example.com',
+    email_confirmed: true,
+    phone: '',
+    phone_confirmed: false,
+    display_name: '',
+    school_name: '',
+    avatar_path: null,
+    avatar_url: null,
+    updated_at: new Date().toISOString()
+  },
   groups: [],
   lessons: [],
   bank: [{
@@ -119,6 +131,20 @@ await page.route(SUPABASE_HOST + '/auth/v1/**', async route => {
 });
 
 const ok = body => ({ status: 200, contentType: 'application/json', body: JSON.stringify({ ok: true, ...body }) });
+await page.route(SUPABASE_HOST + '/functions/v1/pose-quiz-recovery**', async route => {
+  const req = route.request();
+  let body = {};
+  try { body = req.postDataJSON(); } catch {}
+  const action = body.action || '';
+  if (action === 'capabilities') return route.fulfill(ok({ email: true, sms: true }));
+  if (action === 'email.begin') return route.fulfill(ok({ message: 'Đã gửi email' }));
+  if (action === 'email.complete') return route.fulfill(ok({ message: 'Đã đặt mật khẩu' }));
+  if (action === 'phone.begin') return route.fulfill(ok({ phone: '+84912345678', message: 'Đã gửi OTP' }));
+  if (action === 'phone.verify') return route.fulfill(ok({ recovery_token: 'qa-phone-recovery-token' }));
+  if (action === 'phone.complete') return route.fulfill(ok({ message: 'Đã đặt mật khẩu' }));
+  return route.fulfill({ status: 404, contentType: 'application/json', body: JSON.stringify({ ok:false, error:{ message:'Unknown recovery action '+action } }) });
+});
+
 await page.route(SUPABASE_HOST + '/functions/v1/pose-quiz-api**', async route => {
   const req = route.request();
   const u = new URL(req.url());
@@ -129,6 +155,29 @@ await page.route(SUPABASE_HOST + '/functions/v1/pose-quiz-api**', async route =>
   }
 
   if (action === 'bootstrap' || action === 'health') return route.fulfill(ok({ version: 'qa' }));
+  if (action === 'account.profile.get') return route.fulfill(ok({ profile: state.profile }));
+  if (action === 'account.profile.update') {
+    state.profile = { ...state.profile, display_name: body.display_name || '', school_name: body.school_name || '', updated_at: new Date().toISOString() };
+    return route.fulfill(ok({ profile: state.profile }));
+  }
+  if (action === 'account.avatar.upload') {
+    state.profile = {
+      ...state.profile,
+      avatar_path: 'users/qa/avatar.png',
+      avatar_url: 'data:image/png;base64,' + tinyPng.toString('base64')
+    };
+    return route.fulfill(ok({ profile: state.profile }));
+  }
+  if (action === 'account.avatar.delete') {
+    state.profile = { ...state.profile, avatar_path: null, avatar_url: null };
+    return route.fulfill(ok({ profile: state.profile }));
+  }
+  if (action === 'account.phone.begin') return route.fulfill(ok({ phone: '+84912345678' }));
+  if (action === 'account.phone.verify') {
+    state.profile = { ...state.profile, phone: '+84912345678', phone_confirmed: true };
+    return route.fulfill(ok({ profile: state.profile }));
+  }
+  if (action === 'account.password.change') return route.fulfill(ok({ message: 'Đã đổi mật khẩu' }));
   if (action === 'game.start') {
     const questions = body.data?.questions || [];
     state.game = {
@@ -268,11 +317,68 @@ await check('Auth screen renders', async () => {
   await byButton('ĐĂNG NHẬP').click();
 });
 
+await check('Email recovery link reset screen works', async () => {
+  const recoveryUrl = new URL(APP);
+  recoveryUrl.searchParams.set('recovery_state', 'qa-email-recovery-state');
+  await page.goto(recoveryUrl.toString(), { waitUntil: 'networkidle', timeout: 90000 });
+  await hasText('TẠO LẠI MẬT KHẨU').waitFor();
+  const pw = page.locator('input[type=password]');
+  await pw.nth(0).fill('QaReset123!');
+  await pw.nth(1).fill('QaReset123!');
+  await byButton('LƯU MẬT KHẨU MỚI').click();
+  await byButton('ĐĂNG NHẬP').waitFor();
+});
+
+await check('Forgot password email and SMS flows work', async () => {
+  await byButton('QUÊN MẬT KHẨU?').click();
+  await hasText('Khôi phục tài khoản an toàn').waitFor();
+
+  const emailInput = page.locator('input[type=email]');
+  await emailInput.fill('qa@example.com');
+  await byButton('GỬI LIÊN KẾT KHÔI PHỤC').click();
+  await hasText('liên kết tạo lại mật khẩu').waitFor();
+
+  await byButton('📱 SMS').click();
+  await page.getByPlaceholder('0912345678 hoặc +84912345678').fill('0912345678');
+  await byButton('GỬI MÃ OTP').click();
+  await page.getByPlaceholder('000000').fill('123456');
+  await byButton('XÁC MINH OTP').click();
+  const resetPw = page.locator('input[type=password]');
+  await resetPw.nth(0).fill('QaPhone123!');
+  await resetPw.nth(1).fill('QaPhone123!');
+  await byButton('TẠO MẬT KHẨU MỚI').click();
+  await byButton('ĐĂNG NHẬP').waitFor();
+});
+
 await check('Login reaches main menu and backend bootstrap', async () => {
   await page.locator('input[type=email]').fill('qa@example.com');
   await page.locator('input[type=password]').fill('Qa123456!');
   await page.getByRole('button', { name: 'ĐĂNG NHẬP', exact: true }).last().click();
   await byButton('BẮT ĐẦU').waitFor({ timeout: 30000 });
+});
+
+await check('Account profile avatar school and phone controls work', async () => {
+  await byButton('👤 TÀI KHOẢN CỦA TÔI').click();
+  await hasText('TÀI KHOẢN CỦA TÔI').waitFor();
+
+  await page.getByPlaceholder('Nguyễn Văn A').fill('Giáo viên QA');
+  await page.getByPlaceholder('Tên trường...').fill('Trường QA');
+  await byButton('LƯU HỒ SƠ').click();
+  await hasText('Đã cập nhật hồ sơ').waitFor();
+
+  const avatarInput = page.locator('input[type=file][accept="image/*"]').first();
+  await avatarInput.setInputFiles({ name:'avatar.png', mimeType:'image/png', buffer:tinyPng });
+  await byButton('XÓA ẢNH').waitFor();
+  await byButton('XÓA ẢNH').click();
+
+  await page.getByPlaceholder('0912345678 hoặc +84912345678').fill('0912345678');
+  await byButton('GỬI OTP XÁC MINH SỐ MỚI').click();
+  await page.getByPlaceholder('OTP').fill('123456');
+  await byButton('XÁC MINH').click();
+  await hasText('Đã xác minh và cập nhật số điện thoại').waitFor();
+
+  await byButton('← TRANG CHỦ').click();
+  await byButton('BẮT ĐẦU').waitFor();
 });
 
 await check('Editor opens and basic fields work', async () => {
@@ -459,6 +565,21 @@ await check('Game mute/check/result/replay buttons work', async () => {
   await byButton('KIỂM TRA').click();
   await hasText('XUẤT SẮC!').waitFor({ timeout: 10000 });
   await page.getByRole('button', { name: /CHƠI LẠI THÔI/i }).click();
+  await byButton('BẮT ĐẦU').waitFor();
+});
+
+await check('Account password change signs out and new login path remains usable', async () => {
+  await byButton('👤 TÀI KHOẢN CỦA TÔI').click();
+  const pw = page.locator('input[type=password]');
+  await pw.nth(0).fill('Qa123456!');
+  await pw.nth(1).fill('QaChanged123!');
+  await pw.nth(2).fill('QaChanged123!');
+  await byButton('ĐỔI MẬT KHẨU').click();
+  await page.getByRole('button', { name: 'ĐĂNG NHẬP', exact: true }).first().waitFor();
+
+  await page.locator('input[type=email]').fill('qa@example.com');
+  await page.locator('input[type=password]').fill('QaChanged123!');
+  await page.getByRole('button', { name: 'ĐĂNG NHẬP', exact: true }).last().click();
   await byButton('BẮT ĐẦU').waitFor();
 });
 
