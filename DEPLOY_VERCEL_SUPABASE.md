@@ -77,3 +77,22 @@ Sau khi merge PR vào `main`:
 4. Gửi mã này cho giáo viên cần tham gia.
 5. Người nhận vào **Nhóm chia sẻ → Tham gia bằng mã**.
 6. Khi soạn bài, chọn **Theo nhóm riêng** và chọn đúng tên nhóm trước khi lưu câu vào kho.
+
+
+## 6. Media được lưu cùng bài dạy và câu hỏi
+
+Bản cloud hiện lưu toàn bộ dữ liệu media đang dùng trong cấu hình bài dạy:
+
+- Ảnh đại diện cho các tư thế AI.
+- Ảnh minh họa của từng câu hỏi.
+- Ảnh riêng của từng đáp án.
+- Âm thanh riêng của từng câu hỏi.
+- Nhạc nền.
+- Âm thanh khi trả lời đúng.
+- Âm thanh khi trả lời sai.
+
+Khi lưu **Bài dạy cloud**, toàn bộ cấu hình trên nằm trong trường `data` của bài dạy nên mở lại trên thiết bị khác vẫn khôi phục đủ media.
+
+Khi lưu một câu vào **Kho câu hỏi**, câu được lưu cùng ảnh và âm thanh riêng của câu. Nếu một đáp án không có ảnh riêng nhưng đang dùng ảnh tư thế AI của bài hiện tại, hệ thống sao chép ảnh tư thế đó vào bản câu hỏi trong kho để câu chia sẻ không mất hình khi người khác lấy về.
+
+> Lưu ý kiến trúc: phiên bản hiện tại đóng gói media dưới dạng data URL trong JSON để bảo đảm tương thích với ứng dụng HTML hiện tại. Với các file âm thanh/ảnh lớn hoặc số lượng bài nhiều, nên chuyển media sang Supabase Storage và chỉ lưu đường dẫn trong JSON. Supabase khuyến nghị lưu file bên ngoài database cho dữ liệu media có kích thước lớn.
