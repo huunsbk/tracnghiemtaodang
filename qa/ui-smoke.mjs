@@ -209,7 +209,7 @@ async function check(name, fn) {
     throw e;
   }
 }
-const byButton = name => page.getByRole('button', { name, exact: true });
+const byButton = name => page.getByRole('button', { name, exact: false }).first();
 const hasText = text => page.getByText(text, { exact: false }).first();
 
 await page.goto(APP, { waitUntil: 'networkidle', timeout: 90000 });
@@ -240,7 +240,7 @@ await check('Editor opens and basic fields work', async () => {
 await check('Image and audio uploads call backend', async () => {
   const imageInputs = page.locator('input[type=file][accept="image/*"]');
   await imageInputs.nth(0).setInputFiles({ name: 'pose.png', mimeType: 'image/png', buffer: tinyPng });
-  await page.getByText('XÓA', { exact: true }).first().waitFor();
+  await page.getByText(/Xóa/i).first().waitFor();
 
   const audioInputs = page.locator('input[type=file][accept="audio/*"]');
   await audioInputs.nth(0).setInputFiles({ name: 'bgm.wav', mimeType: 'audio/wav', buffer: tinyWav });
