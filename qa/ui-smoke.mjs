@@ -272,6 +272,20 @@ await check('Editor opens and basic fields work', async () => {
   await hasText('CÂU HỎI 2').waitFor();
 });
 
+await check('General settings and question navigation controls work', async () => {
+  const numberInputs = page.locator('input[type=number]');
+  await numberInputs.nth(0).fill('25');
+  await numberInputs.nth(1).fill('4');
+
+  await byButton('CÂU HỎI 2').click();
+  await hasText('Em hãy tạo dáng mới nào!').waitFor();
+  await byButton('CÂU HỎI 1').click();
+
+  const poseSelect = page.locator('select').filter({ hasText: 'Bình thường' }).first();
+  await poseSelect.selectOption('RAISE_LEFT');
+  await poseSelect.selectOption('NONE');
+});
+
 await check('Image and audio uploads call backend', async () => {
   const imageInputs = page.locator('input[type=file][accept="image/*"]');
   await imageInputs.nth(0).setInputFiles({ name: 'pose.png', mimeType: 'image/png', buffer: tinyPng });
@@ -286,6 +300,40 @@ await check('Image and audio uploads call backend', async () => {
   await hasText('question.wav').waitFor();
 });
 
+await check('Media preview, delete and answer-image buttons work', async () => {
+  const imageInputs = page.locator('input[type=file][accept="image/*"]');
+  const audioInputs = page.locator('input[type=file][accept="audio/*"]');
+
+  const bgmCard = page.getByText('Nhạc nền', { exact: true }).locator('..');
+  await bgmCard.getByRole('button', { name: /Nghe thử/i }).click();
+  await bgmCard.getByRole('button', { name: /^Xóa$/i }).click();
+  await audioInputs.nth(0).setInputFiles({ name: 'bgm2.wav', mimeType: 'audio/wav', buffer: tinyWav });
+
+  await page.getByRole('button', { name: '▶ NGHE', exact: true }).click();
+  await page.getByRole('button', { name: 'XÓA', exact: true }).click();
+  await audioInputs.nth(3).setInputFiles({ name: 'question2.wav', mimeType: 'audio/wav', buffer: tinyWav });
+
+  await page.getByRole('button', { name: '✕', exact: true }).click();
+  await imageInputs.nth(5).setInputFiles({ name: 'question2.png', mimeType: 'image/png', buffer: tinyPng });
+
+  await imageInputs.nth(6).setInputFiles({ name: 'answer.png', mimeType: 'image/png', buffer: tinyPng });
+  await byButton('XÓA ẢNH ĐÁP ÁN').click();
+
+  const exactDeleteButtons = page.getByRole('button', { name: /^Xóa$/i });
+  if (await exactDeleteButtons.count()) {
+    await exactDeleteButtons.first().click();
+    await imageInputs.nth(0).setInputFiles({ name: 'pose2.png', mimeType: 'image/png', buffer: tinyPng });
+  }
+});
+
+await check('Question delete button works', async () => {
+  await byButton('CÂU HỎI 2').click();
+  await byButton('XÓA CÂU HỎI NÀY').click();
+  if (await page.getByRole('button', { name: /CÂU HỎI 2/i }).count()) {
+    throw new Error('Question 2 still exists after delete');
+  }
+});
+
 await check('Correct answer selector and bank save work', async () => {
   const correctButtons = page.getByRole('button', { name: /CHỌN LÀM ĐÚNG/ });
   if (await correctButtons.count()) await correctButtons.first().click();
@@ -293,10 +341,16 @@ await check('Correct answer selector and bank save work', async () => {
   const shareSelect = page.locator('select').filter({ hasText: 'Riêng tư — chỉ tôi' }).first();
   await shareSelect.selectOption('public');
   await byButton('LƯU CÂU NÀY VÀO KHO').click();
+  await byButton('LƯU TẤT CẢ VÀO KHO').click();
+  await byButton('MỞ KHO ĐỂ LẤY NHIỀU CÂU').click();
+  await hasText('KHO CÂU HỎI').waitFor();
+  await byButton('← SOẠN BÀI').click();
 });
 
 await check('Cloud save switches to update mode', async () => {
   await byButton('LƯU CLOUD').click();
+  await byButton('CẬP NHẬT CLOUD').waitFor();
+  await byButton('CẬP NHẬT CLOUD').click();
   await byButton('CẬP NHẬT CLOUD').waitFor();
 });
 
@@ -310,10 +364,18 @@ await check('JSON export and import buttons are wired', async () => {
   await byButton('LƯU CLOUD').waitFor();
 });
 
-await check('Question bank filters, select and multi-import work', async () => {
+await check('Question bank filters, owner delete, select and multi-import work', async () => {
   await byButton('📚 KHO CÂU HỎI').click();
-  await hasText('Câu hỏi công khai mẫu').waitFor();
+  await hasText('KHO CÂU HỎI').waitFor();
+
   const sourceSelect = page.locator('select').filter({ hasText: 'Tất cả nguồn' }).first();
+  await sourceSelect.selectOption('MINE');
+  await page.waitForTimeout(350);
+  await byButton('CHỌN TẤT CẢ').click();
+  const deleteOwn = page.getByRole('button', { name: /Xóa câu của tôi \([1-9][0-9]*\)/i });
+  await deleteOwn.waitFor();
+  await deleteOwn.click();
+
   await sourceSelect.selectOption('PUBLIC');
   await hasText('Câu hỏi công khai mẫu').waitFor();
   await byButton('CHỌN TẤT CẢ').click();
@@ -332,6 +394,15 @@ await check('Group create, copy, join, delete and leave work', async () => {
   await page.getByPlaceholder('VD: A1B2C3D4').fill('TEAM1234');
   await byButton('THAM GIA').click();
   await hasText('Nhóm đã tham gia').waitFor();
+
+  await byButton('← TRANG CHỦ').click();
+  await byButton('✏️ SOẠN BÀI').click();
+  const visibilitySelect = page.locator('select').filter({ hasText: 'Riêng tư — chỉ tôi' }).first();
+  await visibilitySelect.selectOption('group');
+  const groupSelect = page.locator('select').filter({ hasText: '-- Chọn nhóm chia sẻ --' }).first();
+  await groupSelect.selectOption('g-owner');
+  await byButton('LƯU CÂU NÀY VÀO KHO').click();
+  await byButton('👥 NHÓM').click();
 
   await byButton('XÓA NHÓM').click();
   await byButton('RỜI NHÓM').click();
