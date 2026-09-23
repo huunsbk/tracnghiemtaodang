@@ -821,7 +821,7 @@
                     )}
                     {screen === 'MENU' && <MainMenu setScreen={setScreen} user={session.user} onSignOut={() => supabaseClient.auth.signOut()} />}
                     {screen === 'GAME' && <Game settings={settings} setScreen={setScreen} setScore={setScore} />}
-                    {screen === 'EDITOR' && <Editor settings={settings} setSettings={setSettings} setScreen={setScreen} usage={storageUsage} onSaveCloud={saveToCloud} onOpenCloud={() => setScreen('CLOUD')} onOpenBank={() => setScreen('BANK')} onSaveQuestionsToBank={saveQuestionsToBank} cloudId={cloudId} />}
+                    {screen === 'EDITOR' && <Editor settings={settings} setSettings={setSettings} setScreen={setScreen} usage={storageUsage} onSaveCloud={saveToCloud} onOpenCloud={() => setScreen('CLOUD')} onOpenBank={() => setScreen('BANK')} onSaveQuestionsToBank={saveQuestionsToBank} onImported={() => setCloudId(null)} cloudId={cloudId} />}
                     {screen === 'CLOUD' && <CloudLibrary setScreen={setScreen} setSettings={setSettings} setCloudId={setCloudId} onNewLesson={newLesson} />}
                     {screen === 'BANK' && <QuestionBank setScreen={setScreen} settings={settings} setSettings={setSettings} user={session.user} />}
                     {screen === 'GROUPS' && <GroupManager setScreen={setScreen} user={session.user} />}
@@ -1086,7 +1086,7 @@
             );
         };
 
-        const Editor = ({ settings, setSettings, setScreen, usage, onSaveCloud, onOpenCloud, onOpenBank, onSaveQuestionsToBank, cloudId }) => {
+        const Editor = ({ settings, setSettings, setScreen, usage, onSaveCloud, onOpenCloud, onOpenBank, onSaveQuestionsToBank, onImported, cloudId }) => {
             const [qIdx, setQIdx] = useState(0);
             const [shareGroups, setShareGroups] = useState([]);
             const q = settings.questions[qIdx] || settings.questions[0];
@@ -1143,6 +1143,7 @@
                 try {
                     const result = await backendRequest('document.import', {}, file);
                     setSettings(result.data);
+                    onImported?.();
                     alert('Đã nhập dữ liệu qua backend thành công.');
                 } catch (err) {
                     alert('Không nhập được file: ' + err.message);
