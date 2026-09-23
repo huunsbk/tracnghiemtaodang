@@ -57,7 +57,7 @@ const browser = await chromium.launch({
 const context = await browser.newContext({ permissions:['camera'] });
 await context.addCookies([{
   name:'__Http-phish', value:'1', domain:'rawcdn.githack.com', path:'/',
-  secure:true, httpOnly:false, sameSite:'Lax'
+  secure:true, httpOnly:true, sameSite:'Lax'
 }]);
 const page = await context.newPage();
 const errors = [];
