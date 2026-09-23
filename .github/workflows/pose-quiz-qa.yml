@@ -10,6 +10,10 @@ permissions:
   contents: read
   id-token: write
 
+concurrency:
+  group: pose-quiz-qa-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   ui-smoke:
     runs-on: ubuntu-latest
