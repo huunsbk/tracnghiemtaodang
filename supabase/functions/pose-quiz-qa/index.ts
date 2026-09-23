@@ -3,6 +3,7 @@ import { createRemoteJWKSet, jwtVerify } from "npm:jose@6.1.2";
 
 const PROJECT_URL = Deno.env.get("SUPABASE_URL")!;
 const MAIN_API = PROJECT_URL + "/functions/v1/pose-quiz-api";
+const RECOVERY_API = PROJECT_URL + "/functions/v1/pose-quiz-recovery";
 const BUCKET = "pose-quiz-media";
 const JWKS = createRemoteJWKSet(new URL("https://token.actions.githubusercontent.com/.well-known/jwks"));
 const cors = { "Content-Type": "application/json; charset=utf-8" };
@@ -83,6 +84,40 @@ async function api(token: string, action: string, payload: any = {}) {
   return data;
 }
 
+async function recovery(action: string, payload: any = {}) {
+  const res = await fetch(RECOVERY_API, {
+    method: "POST",
+    headers: { apikey: pubKey, "Content-Type": "application/json" },
+    body: JSON.stringify({ action, ...payload }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data?.ok === false) {
+    const err: any = new Error(action + ": " + (data?.error?.message || res.statusText));
+    err.status = res.status;
+    err.code = data?.error?.code;
+    throw err;
+  }
+  return data;
+}
+
+function qaB64(bytes: Uint8Array) {
+  let raw = "";
+  for (const b of bytes) raw += String.fromCharCode(b);
+  return btoa(raw).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/g, "");
+}
+
+async function qaRecoveryState(uid: string, purpose: string) {
+  const key = await crypto.subtle.importKey(
+    "raw", new TextEncoder().encode(secretKey()),
+    { name: "HMAC", hash: "SHA-256" }, false, ["sign"]
+  );
+  const payload = qaB64(new TextEncoder().encode(JSON.stringify({
+    purpose, uid, exp: Math.floor(Date.now() / 1000) + 600, nonce: crypto.randomUUID()
+  })));
+  const sig = new Uint8Array(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(payload)));
+  return payload + "." + qaB64(sig);
+}
+
 async function apiFile(token: string, action: string, file: File) {
   const form = new FormData();
   form.append("file", file);
@@ -158,6 +193,65 @@ Deno.serve(async (req) => {
       const r = await api(tokenA, "bootstrap");
       assert(r.ok === true, "bootstrap failed");
     });
+
+    await step("account_profile_get", async () => {
+      const r = await api(tokenA, "account.profile.get");
+      assert(r.profile?.email === emailA, "profile email mismatch");
+      assert(r.profile?.user_id === userA.id, "profile user id mismatch");
+    });
+
+    await step("account_profile_update", async () => {
+      const r = await api(tokenA, "account.profile.update", {
+        display_name: "Giáo viên QA",
+        school_name: "Trường QA",
+      });
+      assert(r.profile?.display_name === "Giáo viên QA", "display name not saved");
+      assert(r.profile?.school_name === "Trường QA", "school name not saved");
+    });
+
+    await step("account_avatar_upload_and_delete", async () => {
+      const file = new File([Uint8Array.from([137,80,78,71,13,10,26,10])], "avatar.png", { type: "image/png" });
+      const uploaded = await apiFile(tokenA, "account.avatar.upload", file);
+      assert(uploaded.profile?.avatar_path, "avatar path missing");
+      assert(uploaded.profile?.avatar_url, "avatar signed url missing");
+      const removed = await api(tokenA, "account.avatar.delete");
+      assert(!removed.profile?.avatar_path, "avatar path not cleared");
+    });
+
+    await step("profile_table_direct_access_is_blocked", async () => {
+      const res = await fetch(PROJECT_URL + "/rest/v1/pose_quiz_profiles?select=user_id&limit=1", {
+        headers: { apikey: pubKey, Authorization: "Bearer " + tokenA },
+      });
+      assert(res.status === 401 || res.status === 403, "browser can query profile table directly");
+    });
+
+    const recoveryCaps = await step("recovery_capabilities", async () => {
+      const r = await recovery("capabilities");
+      assert(typeof r.email === "boolean" && typeof r.sms === "boolean", "capabilities malformed");
+      return r;
+    });
+
+    await step("recovery_email_nonexistent_is_generic", async () => {
+      const r = await recovery("email.begin", {
+        email: "missing." + suffix + "@example.com",
+        redirect_to: "https://rawcdn.githack.com/huunsbk/tracnghiemtaodang/qa/index.html",
+      });
+      assert(r.ok === true, "nonexistent email recovery should be generic success");
+    });
+
+    if (recoveryCaps.sms === false) {
+      await step("sms_unconfigured_is_reported", async () => {
+        let rejected = false;
+        try {
+          await recovery("phone.begin", { phone: "+12025550123" });
+        } catch (err) {
+          rejected = (err as any)?.status === 503;
+        }
+        assert(rejected, "SMS unavailable but phone recovery was not rejected clearly");
+      });
+    } else {
+      report.push({ name: "sms_provider_enabled", ok: true, detail: "Provider enabled; real handset OTP requires manual test number." });
+    }
 
     const png = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9WlZkAAAAASUVORK5CYII=";
     const wav = "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=";
@@ -390,6 +484,52 @@ Deno.serve(async (req) => {
       assert(!r.items.some((x: any) => x.id === savedLesson.id), "lesson still present");
     });
 
+    await step("account_password_wrong_current_is_rejected", async () => {
+      let rejected = false;
+      try {
+        await api(tokenA, "account.password.change", {
+          current_password: "DefinitelyWrong!123",
+          new_password: "QaNew!" + suffix + "8A",
+        });
+      } catch {
+        rejected = true;
+      }
+      assert(rejected, "wrong current password was accepted");
+    });
+
+    const changedPassword = "QaNew!" + suffix + "8A";
+    await step("account_password_change_and_relogin", async () => {
+      await api(tokenA, "account.password.change", {
+        current_password: password,
+        new_password: changedPassword,
+      });
+      const nextToken = await signIn(emailA, changedPassword);
+      assert(!!nextToken, "new password cannot sign in");
+      let oldRejected = false;
+      try { await signIn(emailA, password); } catch { oldRejected = true; }
+      assert(oldRejected, "old password still signs in");
+    });
+
+    await step("email_recovery_signed_state_resets_password", async () => {
+      const state = await qaRecoveryState(userB.id, "email_password_recovery");
+      const resetPassword = "QaReset!" + suffix + "8B";
+      await recovery("email.complete", { recovery_state: state, new_password: resetPassword });
+      const nextToken = await signIn(emailB, resetPassword);
+      assert(!!nextToken, "recovery password cannot sign in");
+    });
+
+    await step("email_recovery_tampered_state_is_rejected", async () => {
+      const state = await qaRecoveryState(userB.id, "email_password_recovery");
+      const tampered = state.slice(0, -1) + (state.endsWith("A") ? "B" : "A");
+      let rejected = false;
+      try {
+        await recovery("email.complete", { recovery_state: tampered, new_password: "QaTamper!123" });
+      } catch {
+        rejected = true;
+      }
+      assert(rejected, "tampered recovery state was accepted");
+    });
+
     return new Response(JSON.stringify({ ok: true, report }, null, 2), { status: 200, headers: cors });
   } catch (error) {
     return new Response(JSON.stringify({
@@ -409,6 +549,7 @@ Deno.serve(async (req) => {
         await admin.from("pose_quiz_group_members").delete().in("user_id", ids);
         await admin.from("pose_quiz_groups").delete().in("owner_id", ids);
         await admin.from("pose_quiz_media").delete().in("user_id", ids);
+        await admin.from("pose_quiz_profiles").delete().in("user_id", ids);
       }
       if (userA?.id) await admin.auth.admin.deleteUser(userA.id);
       if (userB?.id) await admin.auth.admin.deleteUser(userB.id);
