@@ -214,7 +214,7 @@ create table if not exists public.pose_quiz_question_bank (
   subject_name text not null default 'Chưa phân loại',
   lesson_name text not null default 'Chưa phân loại',
   visibility text not null default 'private',
-  group_id uuid references public.pose_quiz_groups(id) on delete cascade,
+  group_id uuid references public.pose_quiz_groups(id),
   question jsonb not null,
   created_at timestamptz not null default now()
 );
@@ -222,7 +222,14 @@ create table if not exists public.pose_quiz_question_bank (
 alter table public.pose_quiz_question_bank
   add column if not exists subject_name text not null default 'Chưa phân loại',
   add column if not exists visibility text not null default 'private',
-  add column if not exists group_id uuid references public.pose_quiz_groups(id) on delete cascade;
+  add column if not exists group_id uuid;
+
+alter table public.pose_quiz_question_bank
+  drop constraint if exists pose_quiz_question_bank_group_id_fkey;
+
+alter table public.pose_quiz_question_bank
+  add constraint pose_quiz_question_bank_group_id_fkey
+  foreign key (group_id) references public.pose_quiz_groups(id);
 
 alter table public.pose_quiz_question_bank
   drop constraint if exists pose_quiz_question_bank_visibility_check;
@@ -314,3 +321,29 @@ on public.pose_quiz_question_bank
 for delete
 to authenticated
 using (user_id = (select auth.uid()));
+
+
+-- When a group is deleted, keep the question itself and return its sharing mode to private.
+create or replace function private.pose_quiz_group_make_questions_private()
+returns trigger
+language plpgsql
+security definer
+set search_path = ''
+as $$
+begin
+  update public.pose_quiz_question_bank
+  set visibility = 'private',
+      group_id = null
+  where group_id = old.id;
+
+  return old;
+end;
+$$;
+
+drop trigger if exists pose_quiz_group_before_delete on public.pose_quiz_groups;
+create trigger pose_quiz_group_before_delete
+before delete on public.pose_quiz_groups
+for each row
+execute function private.pose_quiz_group_make_questions_private();
+
+revoke all on function private.pose_quiz_group_make_questions_private() from public;
