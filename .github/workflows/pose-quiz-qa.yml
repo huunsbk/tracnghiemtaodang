@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: read
+  id-token: write
 
 jobs:
   ui-smoke:
@@ -32,7 +33,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '24'
 
       - name: Install Playwright
         run: |
@@ -55,11 +56,28 @@ jobs:
           APP_URL: http://127.0.0.1:4173/index.html
         run: node qa/ui-smoke.mjs
 
+      - name: Run real backend integration QA
+        run: |
+          OIDC_RESPONSE=$(curl -fsS \
+            -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=pose-quiz-qa")
+          OIDC_TOKEN=$(printf '%s' "$OIDC_RESPONSE" | jq -r '.value')
+          test -n "$OIDC_TOKEN"
+          curl --fail-with-body -sS \
+            -X POST \
+            -H "Authorization: Bearer $OIDC_TOKEN" \
+            "https://exfnarddchxzfewlztwb.supabase.co/functions/v1/pose-quiz-qa" \
+            -o qa-backend-report.json
+          cat qa-backend-report.json
+          jq -e '.ok == true and ([.report[].ok] | all)' qa-backend-report.json >/dev/null
+
       - name: Upload QA screenshot
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: pose-quiz-ui-qa
-          path: qa-ui-final.png
+          path: |
+            qa-ui-final.png
+            qa-backend-report.json
           if-no-files-found: ignore
           retention-days: 7
