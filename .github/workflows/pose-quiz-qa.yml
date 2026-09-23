@@ -1,0 +1,65 @@
+name: Pose Quiz QA
+
+on:
+  push:
+    branches:
+      - supabase-auth-cloud
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ui-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v4
+
+      - name: Enforce backend-only business data access
+        run: |
+          if grep -En "supabaseClient[[:space:]]*\.[[:space:]]*(from|rpc|storage)[[:space:]]*\(" index.html; then
+            echo "Direct database/RPC/Storage access found in frontend"
+            exit 1
+          fi
+          if grep -En "localStorage\.(setItem|getItem).*pose_game" index.html; then
+            echo "Business data persistence found in localStorage"
+            exit 1
+          fi
+          echo "Frontend backend-only access guard: PASS"
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Playwright
+        run: |
+          npm install --no-save playwright@1.55.0
+          npx playwright install --with-deps chromium
+
+      - name: Start local web server
+        run: |
+          python3 -m http.server 4173 --bind 127.0.0.1 > /tmp/pose-quiz-http.log 2>&1 &
+          echo $! > /tmp/pose-quiz-http.pid
+          for i in {1..20}; do
+            curl -fsS http://127.0.0.1:4173/index.html >/dev/null && exit 0
+            sleep 1
+          done
+          cat /tmp/pose-quiz-http.log
+          exit 1
+
+      - name: Run every-button UI smoke test
+        env:
+          APP_URL: http://127.0.0.1:4173/index.html
+        run: node qa/ui-smoke.mjs
+
+      - name: Upload QA screenshot
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pose-quiz-ui-qa
+          path: qa-ui-final.png
+          if-no-files-found: ignore
+          retention-days: 7
