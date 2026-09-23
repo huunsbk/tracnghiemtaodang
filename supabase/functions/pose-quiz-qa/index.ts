@@ -213,6 +213,45 @@ Deno.serve(async (req) => {
       assert(r.item?.data?.questions?.[0]?.image?.url, "signed URL absent on get");
     });
 
+    await step("game_backend_scores_correct_answer", async () => {
+      const started = await api(tokenA, "game.start", { data: lessonData });
+      assert(started.game_token && started.total === 1, "game start token/total invalid");
+      const checked = await api(tokenA, "game.check", {
+        game_token: started.game_token,
+        detected_pose: "NONE",
+      });
+      assert(checked.correct === true, "correct pose was not accepted");
+      assert(checked.score === 1, "backend did not increment score");
+      assert(checked.finished === true, "single-question game should finish");
+    });
+
+    await step("game_backend_scores_wrong_answer", async () => {
+      const started = await api(tokenA, "game.start", { data: lessonData });
+      const checked = await api(tokenA, "game.check", {
+        game_token: started.game_token,
+        detected_pose: "RAISE_LEFT",
+      });
+      assert(checked.correct === false, "wrong pose was accepted");
+      assert(checked.score === 0, "backend incremented score for wrong answer");
+    });
+
+    await step("game_token_tamper_is_rejected", async () => {
+      const started = await api(tokenA, "game.start", { data: lessonData });
+      const original = String(started.game_token);
+      const last = original.slice(-1);
+      const tampered = original.slice(0, -1) + (last === "A" ? "B" : "A");
+      let rejected = false;
+      try {
+        await api(tokenA, "game.check", {
+          game_token: tampered,
+          detected_pose: "NONE",
+        });
+      } catch {
+        rejected = true;
+      }
+      assert(rejected, "tampered game token was accepted");
+    });
+
     await step("direct_media_upload", async () => {
       const file = new File([Uint8Array.from([137,80,78,71,13,10,26,10])], "qa.png", { type: "image/png" });
       const r = await apiFile(tokenA, "media.upload", file);
