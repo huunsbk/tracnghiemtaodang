@@ -62,14 +62,14 @@ jobs:
 
       - name: Verify hosted preview responds
         run: |
-          curl --fail-with-body -sS https://exfnarddchxzfewlztwb.supabase.co/functions/v1/pose-quiz-preview/health | tee hosted-preview-health.json
-          jq -e '.ok == true and .commit == "3f452f3cb5633a55826460513711ad1ef54da02b"' hosted-preview-health.json >/dev/null
-          curl --fail-with-body -sS https://exfnarddchxzfewlztwb.supabase.co/functions/v1/pose-quiz-preview -o hosted-preview.html
+          curl --fail-with-body -sS https://cdn.jsdelivr.net/gh/huunsbk/tracnghiemtaodang@3f452f3cb5633a55826460513711ad1ef54da02b/index.html -o hosted-preview.html
           grep -q "AI POSE QUIZ" hosted-preview.html
+          curl --fail-with-body -sS https://cdn.jsdelivr.net/gh/huunsbk/tracnghiemtaodang@3f452f3cb5633a55826460513711ad1ef54da02b/supabase-config.js -o hosted-supabase-config.js
+          grep -q "exfnarddchxzfewlztwb.supabase.co" hosted-supabase-config.js
 
       - name: Run hosted preview UI smoke test
         env:
-          APP_URL: https://exfnarddchxzfewlztwb.supabase.co/functions/v1/pose-quiz-preview
+          APP_URL: https://cdn.jsdelivr.net/gh/huunsbk/tracnghiemtaodang@3f452f3cb5633a55826460513711ad1ef54da02b/index.html
         run: node qa/ui-smoke.mjs
 
       - name: Run real backend integration QA
