@@ -416,6 +416,8 @@
         const QuestionBank = ({ setScreen, settings, setSettings, user }) => {
             const [items, setItems] = useState([]);
             const [groups, setGroups] = useState([]);
+            const [subjects, setSubjects] = useState([]);
+            const [lessons, setLessons] = useState([]);
             const [loading, setLoading] = useState(true);
             const [error, setError] = useState('');
             const [subjectFilter, setSubjectFilter] = useState('ALL');
@@ -429,10 +431,17 @@
                 setError('');
                 try {
                     const [bankResult, groupResult] = await Promise.all([
-                        backendRequest('bank.list'),
+                        backendRequest('bank.list', {
+                            subject_name: subjectFilter,
+                            lesson_name: lessonFilter,
+                            source: shareFilter,
+                            search: searchText
+                        }),
                         backendRequest('groups.list')
                     ]);
                     setItems(bankResult.items || []);
+                    setSubjects(bankResult.facets?.subjects || []);
+                    setLessons(bankResult.facets?.lessons || []);
                     setGroups(groupResult.groups || []);
                 } catch (err) {
                     setError(err.message || 'Không tải được kho câu hỏi.');
@@ -441,43 +450,23 @@
                 }
             };
 
-            useEffect(() => { load(); }, []);
+            useEffect(() => {
+                const timer = setTimeout(() => load(), 180);
+                return () => clearTimeout(timer);
+            }, [subjectFilter, lessonFilter, shareFilter, searchText]);
 
             const groupNames = useMemo(
                 () => Object.fromEntries(groups.map(group => [group.id, group.name])),
                 [groups]
             );
 
-            const subjects = useMemo(
-                () => [...new Set(items.map(item => item.subject_name || 'Chưa phân loại'))].sort((a, b) => a.localeCompare(b, 'vi')),
-                [items]
-            );
-
-            const lessons = useMemo(() => {
-                const source = subjectFilter === 'ALL'
-                    ? items
-                    : items.filter(item => (item.subject_name || 'Chưa phân loại') === subjectFilter);
-                return [...new Set(source.map(item => item.lesson_name).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'vi'));
-            }, [items, subjectFilter]);
-
             useEffect(() => {
-                if (lessonFilter !== 'ALL' && !lessons.includes(lessonFilter)) setLessonFilter('ALL');
+                if (lessonFilter !== 'ALL' && lessons.length && !lessons.includes(lessonFilter)) {
+                    setLessonFilter('ALL');
+                }
             }, [lessons, lessonFilter]);
 
-            const visibleItems = useMemo(() => {
-                const keyword = searchText.trim().toLowerCase();
-                return items.filter(item => {
-                    const bySubject = subjectFilter === 'ALL' || (item.subject_name || 'Chưa phân loại') === subjectFilter;
-                    const byLesson = lessonFilter === 'ALL' || item.lesson_name === lessonFilter;
-                    const byShare =
-                        shareFilter === 'ALL' ||
-                        (shareFilter === 'MINE' && item.user_id === user.id) ||
-                        (shareFilter === 'PUBLIC' && item.visibility === 'public') ||
-                        (shareFilter === 'GROUP' && item.visibility === 'group');
-                    const byText = !keyword || (item.question?.text || '').toLowerCase().includes(keyword);
-                    return bySubject && byLesson && byShare && byText;
-                });
-            }, [items, subjectFilter, lessonFilter, shareFilter, searchText, user.id]);
+            const visibleItems = items;
 
             const toggle = (id) => {
                 setSelected(prev => {
@@ -498,17 +487,18 @@
                 });
             };
 
-            const addSelectedToLesson = () => {
-                const chosen = items.filter(item => selected.has(item.id));
-                if (!chosen.length) return alert('Hãy chọn ít nhất một câu hỏi.');
-                const now = Date.now();
-                const imported = chosen.map((item, idx) => {
-                    const cloned = JSON.parse(JSON.stringify(item.question));
-                    return { ...cloned, id: now + idx };
-                });
-                setSettings({ ...settings, questions: [...settings.questions, ...imported] });
-                alert(`Đã thêm ${imported.length} câu hỏi vào bài đang soạn.`);
-                setScreen('EDITOR');
+            const addSelectedToLesson = async () => {
+                const ids = [...selected];
+                if (!ids.length) return alert('Hãy chọn ít nhất một câu hỏi.');
+                try {
+                    const result = await backendRequest('bank.resolve', { ids });
+                    const imported = result.questions || [];
+                    setSettings({ ...settings, questions: [...settings.questions, ...imported] });
+                    alert(`Đã thêm ${imported.length} câu hỏi do backend xác thực vào bài đang soạn.`);
+                    setScreen('EDITOR');
+                } catch (err) {
+                    alert('Không lấy được câu hỏi: ' + err.message);
+                }
             };
 
             const ownSelectedIds = items
@@ -633,7 +623,6 @@
 
         const App = () => {
             const [screen, setScreen] = useState('MENU');
-            const [errorMsg, setErrorMsg] = useState(null);
             const [score, setScore] = useState(0);
             const [session, setSession] = useState(null);
             const [authReady, setAuthReady] = useState(false);
@@ -814,12 +803,6 @@
 
             return (
                 <div className="w-screen h-screen bg-white overflow-hidden select-none">
-                    {errorMsg && (
-                        <div className="fixed top-0 left-0 w-full bg-red-600 text-white p-2 text-center z-[100] font-bold shadow-xl">
-                            ⚠️ {errorMsg}
-                            <button onClick={() => setErrorMsg(null)} className="ml-4 bg-white/20 px-2 rounded">Đã hiểu</button>
-                        </div>
-                    )}
                     {screen === 'MENU' && <MainMenu setScreen={setScreen} user={session.user} onSignOut={() => supabaseClient.auth.signOut()} />}
                     {screen === 'GAME' && <Game settings={settings} setScreen={setScreen} setScore={setScore} />}
                     {screen === 'EDITOR' && <Editor settings={settings} setSettings={setSettings} setScreen={setScreen} usage={storageUsage} onSaveCloud={saveToCloud} onOpenCloud={() => setScreen('CLOUD')} onOpenBank={() => setScreen('BANK')} onSaveQuestionsToBank={saveQuestionsToBank} onImported={() => setCloudId(null)} cloudId={cloudId} />}
@@ -1319,6 +1302,9 @@
                                                             {ans.image ? '📎 Đổi ảnh' : '📸 Thêm ảnh riêng'}
                                                             <input type="file" accept="image/*" className="absolute inset-0 opacity-0 cursor-pointer" onChange={(e) => handleFile(e, (data) => updateAnswer(idx, {image: data}))} />
                                                         </div>
+                                                        {ans.image && (
+                                                            <button type="button" onClick={() => updateAnswer(idx, {image: null})} className="w-full text-[8px] font-black text-red-500 uppercase">Xóa ảnh đáp án</button>
+                                                        )}
                                                     </div>
                                                     <div className="w-16 h-16 bg-white rounded-xl border border-slate-100 flex items-center justify-center overflow-hidden relative shadow-inner">
                                                         {ans.image ? <img src={mediaSrc(ans.image)} className="w-full h-full object-contain" /> : (
