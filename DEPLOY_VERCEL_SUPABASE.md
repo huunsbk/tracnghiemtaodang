@@ -5,8 +5,9 @@
 Frontend `index.html` chỉ đảm nhiệm:
 - Giao diện và thao tác người dùng.
 - Supabase Auth để đăng ký/đăng nhập.
-- Camera + MediaPipe Pose realtime trên chính thiết bị người dùng.
+- Camera + MediaPipe Pose realtime trên chính thiết bị người dùng (phần bắt buộc phải chạy gần camera để tránh gửi video lên mạng).
 - Gọi API backend `pose-quiz-api`.
+- Hiển thị trạng thái/tư thế realtime; kết quả chấm đúng-sai và điểm số không được quyết định ở frontend.
 
 Mọi xử lý nghiệp vụ/dữ liệu được thực hiện ở **Supabase Edge Function**:
 - Bài dạy cloud: danh sách, mở, lưu, cập nhật, xóa.
@@ -18,6 +19,7 @@ Mọi xử lý nghiệp vụ/dữ liệu được thực hiện ở **Supabase E
 - Import/export dữ liệu.
 - Upload media, chuyển dữ liệu Base64 cũ sang Storage.
 - Tạo signed URL sau khi backend kiểm tra quyền.
+- Tạo phiên chơi bằng **game token HMAC có chữ ký**, xác thực đáp án và tính điểm ở backend; token bị sửa sẽ bị từ chối.
 
 Frontend **không còn** gọi `supabaseClient.from(...)`, `rpc(...)` hoặc Storage trực tiếp.
 
@@ -106,6 +108,10 @@ Chromium/Playwright kiểm tra:
 - Mở/xóa/tạo bài cloud.
 - Các nút điều hướng.
 - Vào game, tắt tiếng, Kiểm tra, màn kết quả, Chơi lại.
+- Xóa/đổi ảnh, nghe/xóa âm thanh, ảnh đáp án, xóa câu hỏi.
+- Lưu một câu và lưu toàn bộ câu vào kho.
+- Xóa câu của chính mình trong kho.
+- Chọn nhóm chia sẻ ngay trong trình soạn.
 - Đăng xuất.
 
 UI test mock API để kiểm tra wiring/nút mà không làm bẩn dữ liệu thật.
@@ -122,10 +128,14 @@ Sau đó test trên backend thật:
 - bootstrap schema/bucket,
 - lưu/mở/xóa bài,
 - chuyển media Base64 cũ vào Storage,
-- upload media,
+- upload media và xác nhận bucket vẫn private,
+- xác nhận trình duyệt đăng nhập **không thể** đọc bảng nghiệp vụ hay upload Storage trực tiếp,
 - tạo nhóm và tham gia bằng mã,
 - kiểm tra private/public/group,
+- kiểm tra bộ lọc kho chạy ở backend và `bank.resolve` không lấy được câu riêng tư của người khác,
 - xác nhận thành viên không xóa được câu người khác,
+- khởi tạo phiên chơi, chấm đúng/sai và tính điểm tại backend,
+- sửa game token và xác nhận backend từ chối,
 - import/export,
 - xóa nhóm và chuyển câu nhóm về Riêng tư,
 - dọn toàn bộ dữ liệu/tài khoản QA sau test.
@@ -138,3 +148,8 @@ Sau đó test trên backend thật:
 - Business tables không cấp quyền trực tiếp cho browser roles.
 - Backend xác thực JWT và kiểm tra quyền sở hữu/nhóm.
 - QA backend được bảo vệ bằng GitHub OIDC thay vì secret tĩnh.
+
+
+## 8. Ranh giới xử lý camera
+
+Không gửi video camera lên backend. MediaPipe cần chạy realtime trên thiết bị để có độ trễ thấp và bảo vệ riêng tư của học sinh. Frontend chỉ lấy tín hiệu tư thế từ camera; **mọi dữ liệu bền vững, phân quyền, chia sẻ, lưu media, truy vấn kho và kết quả chấm/điểm số đều do backend xử lý**.
