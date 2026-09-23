@@ -32,6 +32,73 @@ const admin = createClient(supabaseUrl, getSecretKey(), {
   auth: { persistSession: false, autoRefreshToken: false },
 });
 
+const GAME_TOKEN_TTL_SECONDS = 2 * 60 * 60;
+const textEncoder = new TextEncoder();
+let gameSigningKeyPromise: Promise<CryptoKey> | null = null;
+
+function toBase64Url(bytes: Uint8Array) {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/g, "");
+}
+
+function fromBase64Url(value: string) {
+  const padded = value.replaceAll("-", "+").replaceAll("_", "/") + "=".repeat((4 - value.length % 4) % 4);
+  const binary = atob(padded);
+  return Uint8Array.from(binary, (char) => char.charCodeAt(0));
+}
+
+function encodeGamePayload(payload: any) {
+  return toBase64Url(textEncoder.encode(JSON.stringify(payload)));
+}
+
+function decodeGamePayload(value: string) {
+  return JSON.parse(new TextDecoder().decode(fromBase64Url(value)));
+}
+
+async function gameSigningKey() {
+  if (!gameSigningKeyPromise) {
+    gameSigningKeyPromise = crypto.subtle.importKey(
+      "raw",
+      textEncoder.encode(getSecretKey()),
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["sign", "verify"],
+    );
+  }
+  return gameSigningKeyPromise;
+}
+
+async function signGamePayload(payload: any) {
+  const encoded = encodeGamePayload(payload);
+  const signature = new Uint8Array(await crypto.subtle.sign(
+    "HMAC",
+    await gameSigningKey(),
+    textEncoder.encode(encoded),
+  ));
+  return encoded + "." + toBase64Url(signature);
+}
+
+async function verifyGameToken(token: string, userId: string) {
+  const [encoded, signatureText, extra] = String(token || "").split(".");
+  if (!encoded || !signatureText || extra) {
+    throw Object.assign(new Error("Phiên chơi không hợp lệ."), { status: 400 });
+  }
+  const valid = await crypto.subtle.verify(
+    "HMAC",
+    await gameSigningKey(),
+    fromBase64Url(signatureText),
+    textEncoder.encode(encoded),
+  );
+  if (!valid) throw Object.assign(new Error("Phiên chơi đã bị thay đổi hoặc không hợp lệ."), { status: 403 });
+  const payload = decodeGamePayload(encoded);
+  if (payload.uid !== userId) throw Object.assign(new Error("Phiên chơi không thuộc tài khoản này."), { status: 403 });
+  if (!payload.exp || Number(payload.exp) < Math.floor(Date.now() / 1000)) {
+    throw Object.assign(new Error("Phiên chơi đã hết hạn."), { status: 410 });
+  }
+  return payload;
+}
+
 let bootstrapPromise: Promise<void> | null = null;
 
 function json(data: unknown, status = 200) {
@@ -384,6 +451,86 @@ async function handleAction(action: string, body: any, user: any, req: Request) 
 
   if (action === "bootstrap" || action === "health") {
     return { ok: true, version: SCHEMA_VERSION, user: { id: user.id, email: user.email } };
+  }
+
+  if (action === "game.start") {
+    let rawSettings = body.data || {};
+    if (body.lesson_id) {
+      const { data: lesson, error } = await admin.from("pose_quiz_sets")
+        .select("data")
+        .eq("id", body.lesson_id)
+        .eq("user_id", userId)
+        .maybeSingle();
+      if (error) throw error;
+      if (!lesson) throw Object.assign(new Error("Không tìm thấy bài dạy để bắt đầu."), { status: 404 });
+      rawSettings = lesson.data;
+    }
+
+    const settings = ensureSettingsShape(rawSettings);
+    const questions = settings.questions || [];
+    if (!questions.length) throw Object.assign(new Error("Bài dạy chưa có câu hỏi."), { status: 400 });
+
+    const correctPoses = questions.map((question: any) => {
+      const correct = (question.answers || []).find((answer: any) => answer.isCorrect);
+      return String(correct?.pose || "NONE");
+    });
+
+    const now = Math.floor(Date.now() / 1000);
+    const payload = {
+      v: 1,
+      uid: userId,
+      sid: crypto.randomUUID(),
+      exp: now + GAME_TOKEN_TTL_SECONDS,
+      index: 0,
+      score: 0,
+      total: questions.length,
+      correct_poses: correctPoses,
+    };
+
+    return {
+      ok: true,
+      game_token: await signGamePayload(payload),
+      index: 0,
+      score: 0,
+      total: questions.length,
+    };
+  }
+
+  if (action === "game.check") {
+    const payload = await verifyGameToken(String(body.game_token || ""), userId);
+    const index = Number(payload.index || 0);
+    const total = Number(payload.total || 0);
+    if (index < 0 || index >= total || !Array.isArray(payload.correct_poses)) {
+      throw Object.assign(new Error("Trạng thái phiên chơi không hợp lệ."), { status: 400 });
+    }
+
+    const detectedPose = String(body.detected_pose || "NONE");
+    const expectedPose = String(payload.correct_poses[index] || "NONE");
+    const correct = detectedPose === expectedPose;
+    const score = Number(payload.score || 0) + (correct ? 1 : 0);
+    const nextIndex = index + 1;
+    const finished = nextIndex >= total;
+
+    let nextToken: string | null = null;
+    if (!finished) {
+      nextToken = await signGamePayload({
+        ...payload,
+        index: nextIndex,
+        score,
+        exp: Math.floor(Date.now() / 1000) + GAME_TOKEN_TTL_SECONDS,
+      });
+    }
+
+    return {
+      ok: true,
+      correct,
+      feedback: correct ? "correct" : "wrong",
+      score,
+      total,
+      finished,
+      next_index: finished ? index : nextIndex,
+      game_token: nextToken,
+    };
   }
 
   if (action === "media.upload") {
