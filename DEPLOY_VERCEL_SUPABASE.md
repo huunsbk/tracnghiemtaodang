@@ -29,7 +29,7 @@ Edge Functions:
 - `pose-quiz-api`: API sản phẩm, yêu cầu JWT hợp lệ.
 - `pose-quiz-qa`: kiểm thử tích hợp backend; không dùng Supabase JWT nhưng tự xác thực GitHub Actions OIDC, chỉ chấp nhận đúng repo/nhánh QA.
 
-`pose-quiz-api` tự tạo/đồng bộ schema và bucket riêng tư `pose-quiz-media` ở lần gọi có xác thực đầu tiên.
+Schema được quản lý bằng `supabase-setup.sql` và đã áp dụng vào database. `pose-quiz-api` không chạy DDL trong runtime; khi khởi động nó chỉ kiểm tra/tạo-cập nhật bucket riêng tư `pose-quiz-media`.
 
 Bảng nghiệp vụ:
 - `pose_quiz_sets`
@@ -40,7 +40,7 @@ Bảng nghiệp vụ:
 
 Các role trình duyệt `anon` và `authenticated` bị **REVOKE** quyền trực tiếp trên những bảng này. Backend dùng khóa bí mật chỉ ở Edge Function và tự kiểm tra quyền trước mỗi thao tác.
 
-File `supabase-setup.sql` chỉ là phương án dự phòng nếu bootstrap tự động gặp sự cố. Bình thường không cần chạy thủ công.
+File `supabase-setup.sql` là nguồn chuẩn để tái tạo/đồng bộ schema. Schema hiện tại đã được áp dụng vào project MotionClass; Edge Function runtime không tự sửa cấu trúc database.
 
 ## 3. Media được lưu
 
