@@ -1,98 +1,140 @@
-# Triển khai AI Pose Quiz với Vercel + Supabase
+# AI Pose Quiz — kiến trúc backend + triển khai
 
-## 1. Supabase
+## 1. Kiến trúc đã chốt
 
-Project đã cấu hình trong `supabase-config.js` là **MotionClass**.
+Frontend `index.html` chỉ đảm nhiệm:
+- Giao diện và thao tác người dùng.
+- Supabase Auth để đăng ký/đăng nhập.
+- Camera + MediaPipe Pose realtime trên chính thiết bị người dùng.
+- Gọi API backend `pose-quiz-api`.
 
-1. Mở Supabase Dashboard -> SQL Editor.
-2. Chạy toàn bộ file `supabase-setup.sql`.
-3. Vào Authentication -> URL Configuration:
-   - Site URL: đặt thành URL Vercel chính thức sau khi triển khai.
-   - Redirect URLs: thêm URL Vercel và (nếu vẫn dùng) `https://huunsbk.github.io/tracnghiemtaodang/`.
-4. Email/Password Auth được dùng cho đăng ký và đăng nhập.
+Mọi xử lý nghiệp vụ/dữ liệu được thực hiện ở **Supabase Edge Function**:
+- Bài dạy cloud: danh sách, mở, lưu, cập nhật, xóa.
+- Kho câu hỏi: lưu, lấy nhiều câu, xóa câu của chủ sở hữu.
+- Phân loại Môn học → Bài học → Câu hỏi.
+- Quyền Riêng tư / Công khai / Theo nhóm.
+- Tạo nhóm, mã nhóm 8 ký tự, tham gia/rời/xóa nhóm.
+- Phân quyền chủ sở hữu/thành viên.
+- Import/export dữ liệu.
+- Upload media, chuyển dữ liệu Base64 cũ sang Storage.
+- Tạo signed URL sau khi backend kiểm tra quyền.
 
-Các bảng `public.pose_quiz_sets`, `public.pose_quiz_question_bank`, `public.pose_quiz_groups` và `public.pose_quiz_group_members` đều được bảo vệ bằng RLS. Mỗi người dùng chỉ được SELECT/INSERT/UPDATE/DELETE dữ liệu có `user_id = auth.uid()`.
+Frontend **không còn** gọi `supabaseClient.from(...)`, `rpc(...)` hoặc Storage trực tiếp.
 
-> `supabase-config.js` chỉ chứa **publishable key**, không chứa service role/secret key.
+## 2. Supabase
 
-## 2. Vercel
+Project: **MotionClass**
 
-Sau khi merge PR vào `main`:
+Edge Functions:
+- `pose-quiz-api`: API sản phẩm, yêu cầu JWT hợp lệ.
+- `pose-quiz-qa`: kiểm thử tích hợp backend; không dùng Supabase JWT nhưng tự xác thực GitHub Actions OIDC, chỉ chấp nhận đúng repo/nhánh QA.
 
-1. Vercel -> Add New -> Project.
-2. Import GitHub repo `huunsbk/tracnghiemtaodang`.
-3. Framework Preset: Other.
-4. Root Directory: mặc định.
-5. Build Command: để trống.
-6. Output Directory: để trống.
-7. Deploy.
+`pose-quiz-api` tự tạo/đồng bộ schema và bucket riêng tư `pose-quiz-media` ở lần gọi có xác thực đầu tiên.
 
-Đây là trang HTML tĩnh nên không cần Node backend riêng.
+Bảng nghiệp vụ:
+- `pose_quiz_sets`
+- `pose_quiz_question_bank`
+- `pose_quiz_groups`
+- `pose_quiz_group_members`
+- `pose_quiz_media`
 
-## 3. Chức năng cloud đã thêm
+Các role trình duyệt `anon` và `authenticated` bị **REVOKE** quyền trực tiếp trên những bảng này. Backend dùng khóa bí mật chỉ ở Edge Function và tự kiểm tra quyền trước mỗi thao tác.
 
-- Đăng ký bằng email/mật khẩu.
-- Đăng nhập/đăng xuất.
-- Tên bài dạy.
-- Lưu bài dạy lên Supabase.
-- Cập nhật bản đã lưu.
-- Thư viện đám mây.
-- Mở lại và xóa bài dạy.
-- Kho câu hỏi theo cấu trúc **Môn học → Bài học → Câu hỏi**.
-- Lưu một câu hoặc toàn bộ câu của bài hiện tại vào kho.
-- Chọn quyền chia sẻ khi lưu: **Riêng tư / Công khai / Theo nhóm**.
-- Câu **Công khai** được các tài khoản đã đăng nhập khác xem và lấy về bài của họ, nhưng không được sửa/xóa bản gốc.
-- Tạo **nhóm chia sẻ riêng**, hệ thống sinh mã nhóm 8 ký tự.
-- Thành viên nhập mã nhóm để tham gia.
-- Câu chia sẻ **Theo nhóm** chỉ hiển thị cho chủ nhóm và thành viên nhóm.
-- Lọc kho theo môn, bài, nguồn chia sẻ; tìm nội dung; chọn nhiều câu và thêm hàng loạt vào bài đang soạn.
-- Chỉ chủ sở hữu câu hỏi mới được xóa/sửa câu gốc.
-- Khi xóa một nhóm, các câu đã chia sẻ vào nhóm không bị xóa mà tự chuyển về **Riêng tư**.
-- Vẫn giữ localStorage và xuất/nhập JSON để dùng dự phòng.
+File `supabase-setup.sql` chỉ là phương án dự phòng nếu bootstrap tự động gặp sự cố. Bình thường không cần chạy thủ công.
 
-## 4. Kiểm thử sau triển khai
+## 3. Media được lưu
 
-1. Tạo tài khoản và xác nhận email.
-2. Đăng nhập.
-3. Vào **Thiết lập bài dạy**.
-4. Đặt tên, thêm/sửa câu hỏi.
-5. Bấm **Lưu cloud**.
-6. Vào **Thư viện đám mây**, mở lại bài.
-7. Đăng xuất, đăng nhập lại trên thiết bị khác để kiểm tra đồng bộ.
-
-
-## 5. Mô hình chia sẻ câu hỏi
-
-| Chế độ | Ai xem được | Ai sửa/xóa câu gốc |
-|---|---|---|
-| Riêng tư | Chỉ người tạo | Người tạo |
-| Công khai | Mọi tài khoản đã đăng nhập | Người tạo |
-| Theo nhóm | Người tạo + thành viên nhóm | Người tạo |
-
-### Quy trình nhóm riêng
-
-1. Vào **Nhóm chia sẻ**.
-2. Chọn **Tạo nhóm mới**.
-3. Hệ thống sinh mã 8 ký tự, ví dụ `A1B2C3D4`.
-4. Gửi mã này cho giáo viên cần tham gia.
-5. Người nhận vào **Nhóm chia sẻ → Tham gia bằng mã**.
-6. Khi soạn bài, chọn **Theo nhóm riêng** và chọn đúng tên nhóm trước khi lưu câu vào kho.
-
-
-## 6. Media được lưu cùng bài dạy và câu hỏi
-
-Bản cloud hiện lưu toàn bộ dữ liệu media đang dùng trong cấu hình bài dạy:
-
-- Ảnh đại diện cho các tư thế AI.
-- Ảnh minh họa của từng câu hỏi.
-- Ảnh riêng của từng đáp án.
-- Âm thanh riêng của từng câu hỏi.
+Tất cả media sau được lưu trong private Supabase Storage:
+- Ảnh các tư thế AI.
+- Ảnh câu hỏi.
+- Ảnh riêng của đáp án.
+- Âm thanh riêng của câu hỏi.
 - Nhạc nền.
-- Âm thanh khi trả lời đúng.
-- Âm thanh khi trả lời sai.
+- Âm thanh đúng.
+- Âm thanh sai.
 
-Khi lưu **Bài dạy cloud**, toàn bộ cấu hình trên nằm trong trường `data` của bài dạy nên mở lại trên thiết bị khác vẫn khôi phục đủ media.
+Database chỉ lưu metadata/path. Backend cấp **signed URL có thời hạn** khi người dùng có quyền truy cập.
 
-Khi lưu một câu vào **Kho câu hỏi**, câu được lưu cùng ảnh và âm thanh riêng của câu. Nếu một đáp án không có ảnh riêng nhưng đang dùng ảnh tư thế AI của bài hiện tại, hệ thống sao chép ảnh tư thế đó vào bản câu hỏi trong kho để câu chia sẻ không mất hình khi người khác lấy về.
+Giới hạn backend hiện tại: tối đa 20 MB cho một tệp ảnh/âm thanh.
 
-> Lưu ý kiến trúc: phiên bản hiện tại đóng gói media dưới dạng data URL trong JSON để bảo đảm tương thích với ứng dụng HTML hiện tại. Với các file âm thanh/ảnh lớn hoặc số lượng bài nhiều, nên chuyển media sang Supabase Storage và chỉ lưu đường dẫn trong JSON. Supabase khuyến nghị lưu file bên ngoài database cho dữ liệu media có kích thước lớn.
+## 4. Chia sẻ
+
+| Chế độ | Ai xem/lấy được | Ai sửa/xóa bản gốc |
+|---|---|---|
+| Riêng tư | Người tạo | Người tạo |
+| Công khai | Tài khoản đã đăng nhập | Người tạo |
+| Theo nhóm | Chủ + thành viên nhóm | Người tạo |
+
+Khi thành viên lấy câu được chia sẻ, ứng dụng sao chép câu vào bài đang soạn; không sửa bản gốc.
+
+Khi chủ nhóm xóa nhóm, câu đã chia sẻ cho nhóm không bị mất mà chuyển về Riêng tư của người tạo.
+
+## 5. Vercel
+
+Tạo project Vercel riêng từ repo:
+- GitHub repo: `huunsbk/tracnghiemtaodang`
+- Framework Preset: **Other**
+- Root Directory: mặc định
+- Build Command: để trống
+- Output Directory: để trống
+
+Không dùng project Vercel `motionclass` hiện có vì đó là ứng dụng khác.
+
+Sau khi có URL Vercel:
+1. Supabase → Authentication → URL Configuration.
+2. Site URL: URL Vercel chính thức.
+3. Redirect URLs: thêm URL Vercel.
+4. Nếu vẫn giữ GitHub Pages, thêm `https://huunsbk.github.io/tracnghiemtaodang/`.
+
+## 6. Kiểm thử tự động
+
+Workflow: `.github/workflows/pose-quiz-qa.yml`
+
+### UI smoke test
+Chromium/Playwright kiểm tra:
+- Đăng nhập và chuyển tab đăng ký.
+- Mở màn soạn bài.
+- Nhập môn/tên bài.
+- Thêm câu.
+- Upload ảnh/âm thanh.
+- Chọn đáp án đúng.
+- Lưu câu vào kho.
+- Lưu/cập nhật cloud.
+- Import/export JSON.
+- Lọc/chọn nhiều câu từ kho.
+- Tạo/tham gia/rời/xóa nhóm.
+- Mở/xóa/tạo bài cloud.
+- Các nút điều hướng.
+- Vào game, tắt tiếng, Kiểm tra, màn kết quả, Chơi lại.
+- Đăng xuất.
+
+UI test mock API để kiểm tra wiring/nút mà không làm bẩn dữ liệu thật.
+
+### Backend integration test
+GitHub Actions lấy OIDC token ngắn hạn. `pose-quiz-qa` xác minh:
+- đúng issuer GitHub,
+- đúng repo `huunsbk/tracnghiemtaodang`,
+- đúng nhánh `supabase-auth-cloud`.
+
+Sau đó test trên backend thật:
+- tạo 2 tài khoản QA tạm thời,
+- đăng nhập,
+- bootstrap schema/bucket,
+- lưu/mở/xóa bài,
+- chuyển media Base64 cũ vào Storage,
+- upload media,
+- tạo nhóm và tham gia bằng mã,
+- kiểm tra private/public/group,
+- xác nhận thành viên không xóa được câu người khác,
+- import/export,
+- xóa nhóm và chuyển câu nhóm về Riêng tư,
+- dọn toàn bộ dữ liệu/tài khoản QA sau test.
+
+## 7. Nguyên tắc bảo mật
+
+- Không đưa secret/service-role key vào frontend hoặc GitHub.
+- Frontend chỉ chứa publishable key.
+- Bucket media luôn private.
+- Business tables không cấp quyền trực tiếp cho browser roles.
+- Backend xác thực JWT và kiểm tra quyền sở hữu/nhóm.
+- QA backend được bảo vệ bằng GitHub OIDC thay vì secret tĩnh.
