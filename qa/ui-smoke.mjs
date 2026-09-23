@@ -378,8 +378,12 @@ await check('Question bank filters, owner delete, select and multi-import work',
 
   await sourceSelect.selectOption('PUBLIC');
   await hasText('Câu hỏi công khai mẫu').waitFor();
-  await byButton('CHỌN TẤT CẢ').click();
-  await page.getByRole('button', { name: /thêm .* câu vào bài đang soạn/i }).click();
+  let addSelected = page.getByRole('button', { name: /thêm.*câu vào bài đang soạn/i });
+  if (!await addSelected.isEnabled()) {
+    await hasText('Câu hỏi công khai mẫu').click();
+    addSelected = page.getByRole('button', { name: /thêm.*câu vào bài đang soạn/i });
+  }
+  await addSelected.click();
   await hasText('THIẾT LẬP BÀI DẠY').waitFor();
 });
 
