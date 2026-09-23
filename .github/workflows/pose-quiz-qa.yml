@@ -57,6 +57,7 @@ jobs:
         run: node qa/ui-smoke.mjs
 
       - name: Run real backend integration QA
+        if: always()
         run: |
           OIDC_RESPONSE=$(curl -fsS \
             -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
