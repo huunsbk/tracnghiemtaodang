@@ -46,6 +46,48 @@
             }
         );
 
+        const API_URL = SUPABASE_CONFIG.url + '/functions/v1/pose-quiz-api';
+
+        const mediaSrc = (value) => {
+            if (!value) return null;
+            if (typeof value === 'string') return value;
+            return value.url || value.signedUrl || null;
+        };
+
+        const backendRequest = async (action, payload = {}, file = null) => {
+            const { data: { session } } = await supabaseClient.auth.getSession();
+            if (!session?.access_token) throw new Error('Phiên đăng nhập đã hết hạn.');
+
+            const options = {
+                method: 'POST',
+                headers: {
+                    Authorization: `Bearer ${session.access_token}`
+                }
+            };
+
+            if (file) {
+                const form = new FormData();
+                form.append('file', file);
+                options.body = form;
+                options.headers['x-pose-action'] = action;
+            } else {
+                options.headers['Content-Type'] = 'application/json';
+                options.body = JSON.stringify({ action, ...payload });
+            }
+
+            const response = await fetch(API_URL + '?action=' + encodeURIComponent(action), options);
+            let result;
+            try {
+                result = await response.json();
+            } catch {
+                throw new Error('Backend trả về dữ liệu không hợp lệ.');
+            }
+            if (!response.ok || result?.ok === false) {
+                throw new Error(result?.error?.message || `Lỗi backend (${response.status})`);
+            }
+            return result;
+        };
+
         const STORAGE_KEY = 'pose_game_data_v9_9_stable';
 
         const DEFAULT_POSE_CONFIG = {
@@ -145,7 +187,7 @@
             );
         };
 
-        const CloudLibrary = ({ setScreen, setSettings, setCloudId }) => {
+        const CloudLibrary = ({ setScreen, setSettings, setCloudId, onNewLesson }) => {
             const [items, setItems] = useState([]);
             const [loading, setLoading] = useState(true);
             const [error, setError] = useState('');
@@ -153,51 +195,64 @@
             const load = async () => {
                 setLoading(true);
                 setError('');
-                const { data, error } = await supabaseClient
-                    .from('pose_quiz_sets')
-                    .select('id,title,data,updated_at')
-                    .order('updated_at', { ascending: false });
-                if (error) setError(error.message);
-                else setItems(data || []);
-                setLoading(false);
+                try {
+                    const result = await backendRequest('lessons.list');
+                    setItems(result.items || []);
+                } catch (err) {
+                    setError(err.message || 'Không tải được thư viện.');
+                } finally {
+                    setLoading(false);
+                }
             };
 
             useEffect(() => { load(); }, []);
 
-            const openItem = (item) => {
-                setSettings(item.data);
-                setCloudId(item.id);
-                setScreen('EDITOR');
+            const openItem = async (item) => {
+                try {
+                    const result = await backendRequest('lessons.get', { id: item.id });
+                    setSettings(result.item.data);
+                    setCloudId(result.item.id);
+                    setScreen('EDITOR');
+                } catch (err) {
+                    alert('Không mở được bài dạy: ' + err.message);
+                }
             };
 
             const removeItem = async (id) => {
                 if (!confirm('Xóa bài dạy này khỏi đám mây?')) return;
-                const { error } = await supabaseClient.from('pose_quiz_sets').delete().eq('id', id);
-                if (error) alert(error.message);
-                else load();
+                try {
+                    await backendRequest('lessons.delete', { id });
+                    load();
+                } catch (err) {
+                    alert('Không xóa được bài dạy: ' + err.message);
+                }
             };
 
             return (
                 <div className="w-full h-full bg-slate-50 flex flex-col">
                     <div className="bg-indigo-700 text-white p-5 px-8 flex items-center justify-between shadow-lg">
                         <div>
-                            <h2 className="text-3xl font-black uppercase">Thư viện đám mây</h2>
-                            <p className="text-indigo-200 text-sm font-semibold">Các bài dạy đã lưu trong tài khoản của thầy/cô</p>
+                            <h2 className="text-3xl font-black uppercase">☁️ Bài dạy cloud</h2>
+                            <p className="text-indigo-200 text-sm font-semibold">Dữ liệu và media được xử lý qua backend</p>
                         </div>
-                        <button onClick={() => setScreen('MENU')} className="bg-white/15 hover:bg-white/25 px-5 py-2 rounded-xl font-black">← TRANG CHỦ</button>
+                        <div className="flex gap-2">
+                            <button onClick={onNewLesson} className="bg-emerald-500 hover:bg-emerald-400 px-5 py-2 rounded-xl font-black">+ BÀI MỚI</button>
+                            <button onClick={() => setScreen('MENU')} className="bg-white/15 hover:bg-white/25 px-5 py-2 rounded-xl font-black">← TRANG CHỦ</button>
+                        </div>
                     </div>
                     <div className="flex-1 overflow-y-auto p-6">
                         <div className="max-w-5xl mx-auto">
-                            {loading && <div className="text-center text-slate-500 font-bold py-16">Đang tải thư viện...</div>}
-                            {error && <div className="bg-red-50 border border-red-200 text-red-700 rounded-2xl p-5 font-bold">Không tải được dữ liệu: {error}<div className="text-xs mt-2 font-semibold">Nếu bảng chưa được tạo, hãy chạy file supabase-setup.sql trong Supabase SQL Editor.</div></div>}
-                            {!loading && !error && items.length === 0 && <div className="text-center bg-white rounded-3xl border-2 border-dashed border-slate-200 p-16 text-slate-500"><div className="text-6xl mb-4">☁️</div><div className="text-xl font-black">Chưa có bài dạy nào trên cloud</div><div className="mt-2">Vào “Thiết lập bài dạy” và bấm “Lưu cloud”.</div></div>}
+                            {loading && <div className="text-center text-slate-500 font-bold py-16">Đang tải thư viện từ backend...</div>}
+                            {error && <div className="bg-red-50 border border-red-200 text-red-700 rounded-2xl p-5 font-bold">Không tải được dữ liệu: {error}</div>}
+                            {!loading && !error && items.length === 0 && <div className="text-center bg-white rounded-3xl border-2 border-dashed border-slate-200 p-16 text-slate-500"><div className="text-6xl mb-4">☁️</div><div className="text-xl font-black">Chưa có bài dạy nào trên cloud</div><div className="mt-2">Bấm “Bài mới” hoặc vào “Soạn bài”.</div></div>}
                             <div className="grid md:grid-cols-2 gap-4">
                                 {items.map(item => (
                                     <div key={item.id} className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 flex flex-col gap-4">
                                         <div className="flex-1">
+                                            <div className="text-[10px] font-black text-indigo-500 uppercase mb-1">{item.subject_name || 'Chưa phân loại'}</div>
                                             <h3 className="text-xl font-black text-slate-800">{item.title || 'Bài dạy chưa đặt tên'}</h3>
                                             <p className="text-xs text-slate-400 font-bold mt-1">Cập nhật: {new Date(item.updated_at).toLocaleString('vi-VN')}</p>
-                                            <p className="text-sm text-slate-500 font-semibold mt-2">{item.data?.questions?.length || 0} câu hỏi</p>
+                                            <p className="text-sm text-slate-500 font-semibold mt-2">{item.question_count || 0} câu hỏi</p>
                                         </div>
                                         <div className="flex gap-2">
                                             <button onClick={() => openItem(item)} className="flex-1 bg-indigo-600 text-white py-2.5 rounded-xl font-black">MỞ</button>
@@ -212,8 +267,6 @@
             );
         };
 
-
-
         const GroupManager = ({ setScreen, user }) => {
             const [groups, setGroups] = useState([]);
             const [loading, setLoading] = useState(true);
@@ -225,13 +278,14 @@
             const loadGroups = async () => {
                 setLoading(true);
                 setError('');
-                const { data, error } = await supabaseClient
-                    .from('pose_quiz_groups')
-                    .select('id,name,join_code,owner_id,created_at')
-                    .order('created_at', { ascending: false });
-                if (error) setError(error.message);
-                else setGroups(data || []);
-                setLoading(false);
+                try {
+                    const result = await backendRequest('groups.list');
+                    setGroups(result.groups || []);
+                } catch (err) {
+                    setError(err.message || 'Không tải được nhóm.');
+                } finally {
+                    setLoading(false);
+                }
             };
 
             useEffect(() => { loadGroups(); }, []);
@@ -240,41 +294,41 @@
                 const name = newGroupName.trim();
                 if (!name) return alert('Hãy nhập tên nhóm.');
                 setBusy(true);
-                const { error } = await supabaseClient
-                    .from('pose_quiz_groups')
-                    .insert({ owner_id: user.id, name });
-                setBusy(false);
-                if (error) return alert('Không tạo được nhóm: ' + error.message);
-                setNewGroupName('');
-                loadGroups();
+                try {
+                    await backendRequest('groups.create', { name });
+                    setNewGroupName('');
+                    await loadGroups();
+                } catch (err) {
+                    alert('Không tạo được nhóm: ' + err.message);
+                } finally {
+                    setBusy(false);
+                }
             };
 
             const joinGroup = async () => {
                 const code = joinCode.trim().toUpperCase();
                 if (!code) return alert('Hãy nhập mã nhóm.');
                 setBusy(true);
-                const { error } = await supabaseClient.rpc('join_pose_quiz_group', { p_code: code });
-                setBusy(false);
-                if (error) return alert('Không tham gia được nhóm. Kiểm tra lại mã nhóm.');
-                setJoinCode('');
-                loadGroups();
+                try {
+                    await backendRequest('groups.join', { code });
+                    setJoinCode('');
+                    await loadGroups();
+                } catch (err) {
+                    alert('Không tham gia được nhóm: ' + err.message);
+                } finally {
+                    setBusy(false);
+                }
             };
 
             const leaveOrDelete = async (group) => {
-                const isOwner = group.owner_id === user.id;
-                if (!confirm(isOwner ? 'Xóa nhóm này? Các chia sẻ theo nhóm cũng sẽ bị xóa.' : 'Rời khỏi nhóm này?')) return;
-                let result;
-                if (isOwner) {
-                    result = await supabaseClient.from('pose_quiz_groups').delete().eq('id', group.id);
-                } else {
-                    result = await supabaseClient
-                        .from('pose_quiz_group_members')
-                        .delete()
-                        .eq('group_id', group.id)
-                        .eq('user_id', user.id);
+                const isOwner = group.is_owner || group.owner_id === user.id;
+                if (!confirm(isOwner ? 'Xóa nhóm này? Câu đã chia sẻ sẽ chuyển về Riêng tư.' : 'Rời khỏi nhóm này?')) return;
+                try {
+                    await backendRequest(isOwner ? 'groups.delete' : 'groups.leave', { group_id: group.id });
+                    await loadGroups();
+                } catch (err) {
+                    alert(err.message);
                 }
-                if (result.error) return alert(result.error.message);
-                loadGroups();
             };
 
             const copyCode = async (code) => {
@@ -301,7 +355,7 @@
                             <div className="grid md:grid-cols-2 gap-5">
                                 <div className="bg-white rounded-3xl border border-slate-200 p-6 shadow-sm">
                                     <h3 className="text-lg font-black text-fuchsia-700 mb-3">Tạo nhóm mới</h3>
-                                    <p className="text-sm text-slate-500 font-semibold mb-4">Ví dụ: “GV Tin học Cốc Đán”, “Tổ chuyên môn lớp 4”.</p>
+                                    <p className="text-sm text-slate-500 font-semibold mb-4">Hệ thống sinh mã nhóm 8 ký tự ở backend.</p>
                                     <div className="flex gap-2">
                                         <input value={newGroupName} onChange={(e) => setNewGroupName(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && createGroup()} placeholder="Tên nhóm..." className="flex-1 px-4 py-3 rounded-xl border-2 border-slate-200 outline-none focus:border-fuchsia-400 font-bold" />
                                         <button disabled={busy} onClick={createGroup} className="px-5 rounded-xl bg-fuchsia-600 text-white font-black disabled:opacity-50">TẠO</button>
@@ -310,7 +364,7 @@
 
                                 <div className="bg-white rounded-3xl border border-slate-200 p-6 shadow-sm">
                                     <h3 className="text-lg font-black text-indigo-700 mb-3">Tham gia bằng mã</h3>
-                                    <p className="text-sm text-slate-500 font-semibold mb-4">Nhập mã 8 ký tự do thành viên nhóm gửi cho thầy/cô.</p>
+                                    <p className="text-sm text-slate-500 font-semibold mb-4">Nhập mã 8 ký tự do chủ nhóm gửi.</p>
                                     <div className="flex gap-2">
                                         <input value={joinCode} onChange={(e) => setJoinCode(e.target.value.toUpperCase())} onKeyDown={(e) => e.key === 'Enter' && joinGroup()} maxLength="8" placeholder="VD: A1B2C3D4" className="flex-1 px-4 py-3 rounded-xl border-2 border-slate-200 outline-none focus:border-indigo-400 font-black uppercase tracking-widest" />
                                         <button disabled={busy} onClick={joinGroup} className="px-5 rounded-xl bg-indigo-600 text-white font-black disabled:opacity-50">THAM GIA</button>
@@ -324,7 +378,7 @@
                                     <span className="text-sm font-bold text-slate-400">{groups.length} nhóm</span>
                                 </div>
                                 {loading && <div className="text-center py-12 text-slate-500 font-bold">Đang tải nhóm...</div>}
-                                {error && <div className="bg-red-50 border border-red-200 text-red-700 rounded-2xl p-5 font-bold">Không tải được nhóm: {error}<div className="text-xs mt-2">Hãy chạy lại file supabase-setup.sql đã cập nhật.</div></div>}
+                                {error && <div className="bg-red-50 border border-red-200 text-red-700 rounded-2xl p-5 font-bold">Không tải được nhóm: {error}</div>}
                                 {!loading && !error && groups.length === 0 && (
                                     <div className="bg-white border-2 border-dashed border-slate-200 rounded-3xl p-12 text-center text-slate-500">
                                         <div className="text-5xl mb-3">👥</div>
@@ -333,7 +387,7 @@
                                 )}
                                 <div className="grid md:grid-cols-2 gap-4">
                                     {groups.map(group => {
-                                        const isOwner = group.owner_id === user.id;
+                                        const isOwner = group.is_owner || group.owner_id === user.id;
                                         return (
                                             <div key={group.id} className="bg-white border border-slate-200 rounded-2xl p-5 shadow-sm">
                                                 <div className="flex items-start justify-between gap-3">
@@ -344,6 +398,7 @@
                                                         </div>
                                                         <div className="text-xs text-slate-400 font-bold">Mã nhóm</div>
                                                         <div className="text-2xl font-black tracking-[0.18em] text-indigo-700 mt-1">{group.join_code}</div>
+                                                        <div className="text-xs font-bold text-slate-400 mt-2">{group.member_count || 1} thành viên</div>
                                                     </div>
                                                     <button onClick={() => copyCode(group.join_code)} className="bg-slate-100 hover:bg-slate-200 px-3 py-2 rounded-xl text-xs font-black">SAO CHÉP</button>
                                                 </div>
@@ -373,20 +428,18 @@
             const load = async () => {
                 setLoading(true);
                 setError('');
-                const [questionsResult, groupsResult] = await Promise.all([
-                    supabaseClient
-                        .from('pose_quiz_question_bank')
-                        .select('id,user_id,subject_name,lesson_name,visibility,group_id,question,created_at')
-                        .order('created_at', { ascending: false }),
-                    supabaseClient
-                        .from('pose_quiz_groups')
-                        .select('id,name,join_code,owner_id')
-                        .order('name', { ascending: true })
-                ]);
-                if (questionsResult.error) setError(questionsResult.error.message);
-                else setItems(questionsResult.data || []);
-                if (!groupsResult.error) setGroups(groupsResult.data || []);
-                setLoading(false);
+                try {
+                    const [bankResult, groupResult] = await Promise.all([
+                        backendRequest('bank.list'),
+                        backendRequest('groups.list')
+                    ]);
+                    setItems(bankResult.items || []);
+                    setGroups(groupResult.groups || []);
+                } catch (err) {
+                    setError(err.message || 'Không tải được kho câu hỏi.');
+                } finally {
+                    setLoading(false);
+                }
             };
 
             useEffect(() => { load(); }, []);
@@ -466,17 +519,17 @@
             const deleteSelected = async () => {
                 if (!ownSelectedIds.length) return alert('Không có câu hỏi do thầy/cô sở hữu trong phần đã chọn.');
                 if (!confirm(`Xóa ${ownSelectedIds.length} câu của thầy/cô khỏi kho?`)) return;
-                const { error } = await supabaseClient
-                    .from('pose_quiz_question_bank')
-                    .delete()
-                    .in('id', ownSelectedIds);
-                if (error) return alert(error.message);
-                setSelected(prev => {
-                    const next = new Set(prev);
-                    ownSelectedIds.forEach(id => next.delete(id));
-                    return next;
-                });
-                load();
+                try {
+                    await backendRequest('bank.delete', { ids: ownSelectedIds });
+                    setSelected(prev => {
+                        const next = new Set(prev);
+                        ownSelectedIds.forEach(id => next.delete(id));
+                        return next;
+                    });
+                    load();
+                } catch (err) {
+                    alert('Không xóa được câu hỏi: ' + err.message);
+                }
             };
 
             const visibilityInfo = (item) => {
@@ -525,7 +578,7 @@
                     <div className="flex-1 overflow-y-auto p-6">
                         <div className="max-w-7xl mx-auto">
                             {loading && <div className="text-center py-16 font-bold text-slate-500">Đang tải kho câu hỏi...</div>}
-                            {error && <div className="bg-red-50 border border-red-200 text-red-700 rounded-2xl p-5 font-bold">Không tải được kho câu hỏi: {error}<div className="text-xs mt-2">Hãy chạy lại file supabase-setup.sql đã cập nhật.</div></div>}
+                            {error && <div className="bg-red-50 border border-red-200 text-red-700 rounded-2xl p-5 font-bold">Không tải được kho câu hỏi: {error}<div className="text-xs mt-2">Backend chưa sẵn sàng. Hãy kiểm tra kết nối.</div></div>}
                             {!loading && !error && visibleItems.length === 0 && (
                                 <div className="text-center bg-white rounded-3xl border-2 border-dashed border-slate-200 p-14 text-slate-500">
                                     <div className="text-6xl mb-3">📭</div>
@@ -557,7 +610,7 @@
                                                     <div className="text-base font-black text-slate-800">{item.question?.text || 'Câu hỏi không có nội dung'}</div>
                                                     {correct && <div className="mt-2 text-xs font-bold text-emerald-600">Đáp án đúng: {correct.text}</div>}
                                                 </div>
-                                                {item.question?.image && <img src={item.question.image} className="w-20 h-20 object-contain rounded-xl border border-slate-100 bg-slate-50" />}
+                                                {item.question?.image && <img src={mediaSrc(item.question.image)} className="w-20 h-20 object-contain rounded-xl border border-slate-100 bg-slate-50" />}
                                             </div>
                                         </button>
                                     );
@@ -585,13 +638,11 @@
             const [score, setScore] = useState(0);
             const [session, setSession] = useState(null);
             const [authReady, setAuthReady] = useState(false);
+            const [backendReady, setBackendReady] = useState(false);
+            const [backendError, setBackendError] = useState('');
             const [cloudId, setCloudId] = useState(null);
             
             const [settings, setSettings] = useState(() => {
-                try {
-                    const saved = localStorage.getItem(STORAGE_KEY);
-                    if (saved) return JSON.parse(saved);
-                } catch (e) { console.error("Load failed", e); }
                 return {
                     subject: "Tin học",
                     title: "Bài dạy AI Pose Quiz",
@@ -648,22 +699,33 @@
             }, []);
 
             useEffect(() => {
-                try {
-                    localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
-                } catch (e) {
-                    if (e.name === 'QuotaExceededError') {
-                        setErrorMsg("Bộ nhớ đầy! Hãy bấm 'Thiết lập' -> 'Lưu file' để lưu bài dạy ra máy tính.");
-                    }
+                if (!session) {
+                    setBackendReady(false);
+                    setBackendError('');
+                    return;
                 }
-            }, [settings]);
+                let cancelled = false;
+                setBackendReady(false);
+                setBackendError('');
+                backendRequest('bootstrap')
+                    .then(() => { if (!cancelled) setBackendReady(true); })
+                    .catch((err) => { if (!cancelled) setBackendError(err.message || 'Không kết nối được backend.'); });
+                return () => { cancelled = true; };
+            }, [session?.access_token]);
 
             const storageUsage = useMemo(() => {
-                const str = JSON.stringify(settings);
-                return (str.length * 2) / (1024 * 1024);
+                const paths = new Set();
+                const walk = (value) => {
+                    if (Array.isArray(value)) return value.forEach(walk);
+                    if (!value || typeof value !== 'object') return;
+                    if (value.path) paths.add(value.path);
+                    Object.values(value).forEach(walk);
+                };
+                walk(settings);
+                return paths.size;
             }, [settings]);
 
             const saveQuestionsToBank = async (questions) => {
-                if (!session?.user) return alert('Vui lòng đăng nhập lại.');
                 const subjectName = (settings.subject || 'Chưa phân loại').trim() || 'Chưa phân loại';
                 const lessonName = (settings.title || 'Chưa phân loại').trim() || 'Chưa phân loại';
                 const visibility = ['private', 'public', 'group'].includes(settings.bankVisibility)
@@ -674,73 +736,62 @@
                 if (!questions?.length) return alert('Không có câu hỏi để lưu.');
                 if (visibility === 'group' && !groupId) return alert('Hãy chọn nhóm muốn chia sẻ.');
 
-                const payload = questions.map(question => {
-                    const bankQuestion = JSON.parse(JSON.stringify(question));
-                    bankQuestion.audio = bankQuestion.audio || { data: null, name: "" };
-                    bankQuestion.answers = (bankQuestion.answers || []).map(answer => ({
-                        ...answer,
-                        image: answer.image || settings.poseAssets?.[answer.pose] || null
-                    }));
-                    return {
-                        user_id: session.user.id,
+                try {
+                    const result = await backendRequest('bank.save', {
                         subject_name: subjectName,
                         lesson_name: lessonName,
                         visibility,
                         group_id: groupId,
-                        question: bankQuestion
-                    };
-                });
-
-                const { error } = await supabaseClient
-                    .from('pose_quiz_question_bank')
-                    .insert(payload);
-
-                if (error) {
-                    alert('Không lưu được vào kho câu hỏi: ' + error.message);
-                    return;
+                        questions,
+                        pose_assets: settings.poseAssets || {}
+                    });
+                    alert(`Đã lưu ${result.count || questions.length} câu vào kho qua backend.`);
+                } catch (err) {
+                    alert('Không lưu được vào kho câu hỏi: ' + err.message);
                 }
-
-                const shareText =
-                    visibility === 'public' ? 'công khai' :
-                    visibility === 'group' ? 'cho nhóm đã chọn' :
-                    'riêng tư';
-                alert(`Đã lưu ${questions.length} câu vào ${subjectName} → ${lessonName} (${shareText}).`);
             };
 
             const saveToCloud = async () => {
-                if (!session?.user) return alert('Vui lòng đăng nhập lại.');
-                const payload = {
-                    user_id: session.user.id,
-                    title: (settings.title || 'Bài dạy AI Pose Quiz').trim(),
-                    data: settings,
-                    updated_at: new Date().toISOString()
-                };
-
-                let result;
-                if (cloudId) {
-                    result = await supabaseClient
-                        .from('pose_quiz_sets')
-                        .update(payload)
-                        .eq('id', cloudId)
-                        .eq('user_id', session.user.id)
-                        .select('id')
-                        .single();
-                } else {
-                    result = await supabaseClient
-                        .from('pose_quiz_sets')
-                        .insert(payload)
-                        .select('id')
-                        .single();
+                try {
+                    const result = await backendRequest('lessons.save', {
+                        id: cloudId,
+                        subject_name: (settings.subject || 'Chưa phân loại').trim(),
+                        title: (settings.title || 'Bài dạy AI Pose Quiz').trim(),
+                        data: settings
+                    });
+                    setCloudId(result.item.id);
+                    setSettings(result.item.data);
+                    alert(cloudId ? 'Đã cập nhật bài dạy trên backend.' : 'Đã lưu bài dạy và toàn bộ media lên backend.');
+                } catch (err) {
+                    alert('Không lưu được bài dạy: ' + err.message);
                 }
+            };
 
-                if (result.error) {
-                    alert('Không lưu được lên cloud: ' + result.error.message);
-                    return;
-                }
-                setCloudId(result.data.id);
-                alert(cloudId
-                    ? 'Đã cập nhật đầy đủ bài dạy và media trên cloud.'
-                    : 'Đã lưu đầy đủ bài dạy và media lên cloud.');
+            const newLesson = () => {
+                setCloudId(null);
+                setSettings({
+                    subject: 'Tin học',
+                    title: 'Bài dạy mới',
+                    bankVisibility: 'private',
+                    bankGroupId: '',
+                    timeLimit: 20,
+                    checkInterval: 3,
+                    numAnswers: 4,
+                    poseAssets: { NONE: null, RAISE_LEFT: null, RAISE_RIGHT: null, BOTH_UP: null, CROSS_ARMS: null },
+                    questions: [{
+                        id: Date.now(),
+                        text: 'Nhập nội dung câu hỏi...',
+                        image: null,
+                        audio: { data: null, name: '' },
+                        answers: Array(4).fill(0).map((_, idx) => ({ text: `Đáp án ${idx + 1}`, pose: 'NONE', isCorrect: idx === 0, image: null }))
+                    }],
+                    audio: {
+                        correct: { data: null, name: '' },
+                        wrong: { data: null, name: '' },
+                        bgm: { data: null, name: '' }
+                    }
+                });
+                setScreen('EDITOR');
             };
 
             if (!authReady) {
@@ -748,6 +799,19 @@
             }
 
             if (!session) return <AuthScreen />;
+
+            if (!backendReady) {
+                return (
+                    <div className="w-screen h-screen bg-slate-950 text-white grid place-items-center p-6 text-center">
+                        <div>
+                            <div className="text-6xl mb-4">⚙️</div>
+                            <div className="text-xl font-black">{backendError ? 'Không kết nối được backend' : 'Đang khởi tạo backend...'}</div>
+                            {backendError && <div className="mt-3 text-red-300 font-bold max-w-xl">{backendError}</div>}
+                            {backendError && <button onClick={() => window.location.reload()} className="mt-5 bg-indigo-600 px-5 py-2 rounded-xl font-black">THỬ LẠI</button>}
+                        </div>
+                    </div>
+                );
+            }
 
             return (
                 <div className="w-screen h-screen bg-white overflow-hidden select-none">
@@ -760,7 +824,7 @@
                     {screen === 'MENU' && <MainMenu setScreen={setScreen} user={session.user} onSignOut={() => supabaseClient.auth.signOut()} />}
                     {screen === 'GAME' && <Game settings={settings} setScreen={setScreen} setScore={setScore} />}
                     {screen === 'EDITOR' && <Editor settings={settings} setSettings={setSettings} setScreen={setScreen} usage={storageUsage} onSaveCloud={saveToCloud} onOpenCloud={() => setScreen('CLOUD')} onOpenBank={() => setScreen('BANK')} onSaveQuestionsToBank={saveQuestionsToBank} cloudId={cloudId} />}
-                    {screen === 'CLOUD' && <CloudLibrary setScreen={setScreen} setSettings={setSettings} setCloudId={setCloudId} />}
+                    {screen === 'CLOUD' && <CloudLibrary setScreen={setScreen} setSettings={setSettings} setCloudId={setCloudId} onNewLesson={newLesson} />}
                     {screen === 'BANK' && <QuestionBank setScreen={setScreen} settings={settings} setSettings={setSettings} user={session.user} />}
                     {screen === 'GROUPS' && <GroupManager setScreen={setScreen} user={session.user} />}
                     {screen === 'RESULT' && <Result score={score} total={settings.questions.length} setScreen={setScreen} />}
@@ -809,8 +873,8 @@
             const currentQuestion = settings.questions[qIndex];
 
             const getPoseVisual = (poseId) => {
-                if (settings.poseAssets?.[poseId]) {
-                    return <img src={settings.poseAssets[poseId]} className="w-full h-full object-contain" />;
+                if (mediaSrc(settings.poseAssets?.[poseId])) {
+                    return <img src={mediaSrc(settings.poseAssets[poseId])} className="w-full h-full object-contain" />;
                 }
                 return <span className="text-4xl">{DEFAULT_POSE_CONFIG[poseId]?.icon || '❓'}</span>;
             };
@@ -832,7 +896,7 @@
                     questionAudioRef.current.pause();
                     questionAudioRef.current.currentTime = 0;
                 }
-                const audioSrc = isCorrect ? settings.audio.correct?.data : settings.audio.wrong?.data;
+                const audioSrc = mediaSrc(isCorrect ? settings.audio.correct?.data : settings.audio.wrong?.data);
                 if (audioSrc && !isMuted) new Audio(audioSrc).play().catch(() => {});
 
                 setTimeout(() => {
@@ -862,7 +926,7 @@
                     bgmRef.current = null;
                 }
                 if (settings.audio.bgm?.data && !isMuted) {
-                    bgmRef.current = new Audio(settings.audio.bgm.data);
+                    bgmRef.current = new Audio(mediaSrc(settings.audio.bgm.data));
                     bgmRef.current.loop = true;
                     bgmRef.current.volume = 0.3;
                     bgmRef.current.play().catch(() => {});
@@ -880,7 +944,7 @@
                     questionAudioRef.current.pause();
                     questionAudioRef.current = null;
                 }
-                const questionAudio = currentQuestion?.audio?.data;
+                const questionAudio = mediaSrc(currentQuestion?.audio?.data);
                 if (questionAudio && !isMuted && !feedback) {
                     questionAudioRef.current = new Audio(questionAudio);
                     questionAudioRef.current.volume = 1;
@@ -962,7 +1026,7 @@
                                 <h2 className="text-3xl font-black text-slate-800 mb-4 text-center leading-tight">{currentQuestion.text}</h2>
                                 {currentQuestion.image ? (
                                     <div className="flex-1 w-full flex items-center justify-center overflow-hidden">
-                                        <img src={currentQuestion.image} className="max-w-full max-h-full object-contain rounded-3xl shadow-2xl border-4 border-white" alt="Câu hỏi" />
+                                        <img src={mediaSrc(currentQuestion.image)} className="max-w-full max-h-full object-contain rounded-3xl shadow-2xl border-4 border-white" alt="Câu hỏi" />
                                     </div>
                                 ) : (
                                     <div className="w-64 h-64 flex items-center justify-center character-bounce">
@@ -979,7 +1043,7 @@
                                             <span className="text-lg font-bold text-slate-700 leading-tight block line-clamp-2">{ans.text}</span>
                                         </div>
                                         <div className="flex-shrink-0 w-20 h-20 flex items-center justify-center bg-white rounded-2xl overflow-hidden border-2 border-slate-100 shadow-inner">
-                                            {ans.image ? <img src={ans.image} className="w-full h-full object-contain" /> : getPoseVisual(ans.pose)}
+                                            {ans.image ? <img src={mediaSrc(ans.image)} className="w-full h-full object-contain" /> : getPoseVisual(ans.pose)}
                                         </div>
                                     </div>
                                 ))}
@@ -1030,19 +1094,21 @@
             const q = settings.questions[qIdx] || settings.questions[0];
 
             useEffect(() => {
-                supabaseClient
-                    .from('pose_quiz_groups')
-                    .select('id,name,join_code,owner_id')
-                    .order('name', { ascending: true })
-                    .then(({ data }) => setShareGroups(data || []));
+                backendRequest('groups.list')
+                    .then((result) => setShareGroups(result.groups || []))
+                    .catch(() => setShareGroups([]));
             }, []);
 
-            const handleFile = (e, callback) => {
+            const handleFile = async (e, callback) => {
                 const file = e.target.files[0];
-                if (file) { 
-                    const reader = new FileReader(); 
-                    reader.onload = (ev) => callback(ev.target.result, file.name); 
-                    reader.readAsDataURL(file); 
+                if (!file) return;
+                try {
+                    const result = await backendRequest('media.upload', {}, file);
+                    callback(result.asset, file.name);
+                } catch (err) {
+                    alert('Không tải được media: ' + err.message);
+                } finally {
+                    e.target.value = '';
                 }
             };
 
@@ -1058,27 +1124,33 @@
                 setSettings({ ...settings, questions: nq });
             };
 
-            const exportData = () => {
-                const dataStr = JSON.stringify(settings);
-                const dataUri = 'data:application/json;charset=utf-8,'+ encodeURIComponent(dataStr);
-                const a = document.createElement('a');
-                a.setAttribute('href', dataUri);
-                a.setAttribute('download', `ai_pose_quiz_${new Date().getTime()}.json`);
-                a.click();
+            const exportData = async () => {
+                try {
+                    const result = await backendRequest('document.export', { data: settings });
+                    const blob = new Blob([JSON.stringify(result.data, null, 2)], { type: 'application/json;charset=utf-8' });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = `ai_pose_quiz_${Date.now()}.json`;
+                    a.click();
+                    URL.revokeObjectURL(url);
+                } catch (err) {
+                    alert('Không xuất được dữ liệu: ' + err.message);
+                }
             };
 
-            const importData = (e) => {
+            const importData = async (e) => {
                 const file = e.target.files[0];
                 if (!file) return;
-                const reader = new FileReader();
-                reader.onload = (ev) => {
-                    try { 
-                        const data = JSON.parse(ev.target.result);
-                        setSettings(data); 
-                        alert("Đã nhập dữ liệu bài dạy thành công!"); 
-                    } catch (err) { alert("File không hợp lệ!"); }
-                };
-                reader.readAsText(file);
+                try {
+                    const result = await backendRequest('document.import', {}, file);
+                    setSettings(result.data);
+                    alert('Đã nhập dữ liệu qua backend thành công.');
+                } catch (err) {
+                    alert('Không nhập được file: ' + err.message);
+                } finally {
+                    e.target.value = '';
+                }
             };
 
             return (
@@ -1091,8 +1163,7 @@
                                 <input value={settings.title || ''} onChange={(e) => setSettings({...settings, title: e.target.value})} placeholder="Tên bài dạy" className="w-80 max-w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-1 text-sm font-bold outline-none focus:border-indigo-300" />
                             </div>
                             <div className="flex items-center gap-2 mt-1">
-                                <div className="w-32 h-2 bg-slate-200 rounded-full overflow-hidden"><div className={`h-full ${usage > 4.5 ? 'bg-red-500' : 'bg-green-500'}`} style={{width: `${Math.min(100, (usage/5)*100)}%`}}></div></div>
-                                <span className="text-[10px] font-bold text-slate-400">Dung lượng: {usage.toFixed(2)} / 5 MB</span>
+                                <span className="text-[10px] font-bold text-emerald-600">☁️ {usage} media đang tham chiếu • Storage riêng tư</span>
                             </div>
                         </div>
                         <div className="flex gap-2 flex-wrap justify-end">
@@ -1130,7 +1201,7 @@
                                         <div key={poseId} className="flex items-center gap-3 p-2 bg-slate-50 rounded-xl border border-slate-100">
                                             <div className="w-10 h-10 bg-white rounded-lg flex items-center justify-center overflow-hidden border border-slate-200 flex-shrink-0">
                                                 {settings.poseAssets[poseId] ? (
-                                                    <img src={settings.poseAssets[poseId]} className="w-full h-full object-contain" />
+                                                    <img src={mediaSrc(settings.poseAssets[poseId])} className="w-full h-full object-contain" />
                                                 ) : (
                                                     <span className="text-xl">{DEFAULT_POSE_CONFIG[poseId].icon}</span>
                                                 )}
@@ -1164,7 +1235,7 @@
                                             </div>
                                             {settings.audio[type]?.data && (
                                                 <div className="flex gap-2 mt-1">
-                                                    <button type="button" onClick={() => new Audio(settings.audio[type].data).play().catch(() => {})} className="text-[8px] font-black text-indigo-500 uppercase">▶ Nghe thử</button>
+                                                    <button type="button" onClick={() => new Audio(mediaSrc(settings.audio[type].data)).play().catch(() => {})} className="text-[8px] font-black text-indigo-500 uppercase">▶ Nghe thử</button>
                                                     <button type="button" onClick={() => setSettings({...settings, audio: {...settings.audio, [type]: {data: null, name: ""}}})} className="text-[8px] font-black text-red-500 uppercase">Xóa</button>
                                                 </div>
                                             )}
@@ -1215,7 +1286,7 @@
                                                 </label>
                                                 {q.audio?.data && (
                                                     <>
-                                                        <button type="button" onClick={() => new Audio(q.audio.data).play().catch(() => {})} className="px-3 py-2.5 rounded-xl bg-amber-500 text-white font-black text-xs">▶ NGHE</button>
+                                                        <button type="button" onClick={() => new Audio(mediaSrc(q.audio.data)).play().catch(() => {})} className="px-3 py-2.5 rounded-xl bg-amber-500 text-white font-black text-xs">▶ NGHE</button>
                                                         <button type="button" onClick={() => updateQuestion({audio: {data: null, name: ""}})} className="px-3 py-2.5 rounded-xl bg-red-50 border border-red-100 text-red-600 font-black text-xs">XÓA</button>
                                                     </>
                                                 )}
@@ -1224,7 +1295,7 @@
                                         <div className="w-40 flex flex-col gap-2">
                                             <label className="text-xs font-black text-slate-400 uppercase block tracking-widest text-center">Ảnh minh họa</label>
                                             <div className="relative aspect-square bg-slate-50 rounded-2xl border-2 border-dashed border-slate-200 overflow-hidden flex flex-col items-center justify-center">
-                                                {q.image ? <><img src={q.image} className="w-full h-full object-contain" /><button onClick={() => updateQuestion({image: null})} className="absolute top-1 right-1 bg-red-500 text-white w-6 h-6 rounded-full flex items-center justify-center font-bold shadow-lg">✕</button></> : <span className="text-2xl opacity-30 font-black">🖼️</span>}
+                                                {q.image ? <><img src={mediaSrc(q.image)} className="w-full h-full object-contain" /><button onClick={() => updateQuestion({image: null})} className="absolute top-1 right-1 bg-red-500 text-white w-6 h-6 rounded-full flex items-center justify-center font-bold shadow-lg">✕</button></> : <span className="text-2xl opacity-30 font-black">🖼️</span>}
                                                 <input type="file" accept="image/*" className="absolute inset-0 opacity-0 cursor-pointer" onChange={(e) => handleFile(e, (data) => updateQuestion({image: data}))} />
                                             </div>
                                         </div>
@@ -1250,8 +1321,8 @@
                                                         </div>
                                                     </div>
                                                     <div className="w-16 h-16 bg-white rounded-xl border border-slate-100 flex items-center justify-center overflow-hidden relative shadow-inner">
-                                                        {ans.image ? <img src={ans.image} className="w-full h-full object-contain" /> : (
-                                                            settings.poseAssets[ans.pose] ? <img src={settings.poseAssets[ans.pose]} className="w-full h-full object-contain" /> : <span className="text-2xl">{DEFAULT_POSE_CONFIG[ans.pose]?.icon}</span>
+                                                        {ans.image ? <img src={mediaSrc(ans.image)} className="w-full h-full object-contain" /> : (
+                                                            settings.poseAssets[ans.pose] ? <img src={mediaSrc(settings.poseAssets[ans.pose])} className="w-full h-full object-contain" /> : <span className="text-2xl">{DEFAULT_POSE_CONFIG[ans.pose]?.icon}</span>
                                                         )}
                                                     </div>
                                                 </div>
