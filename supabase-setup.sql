@@ -46,3 +46,50 @@ on public.pose_quiz_sets
 for delete
 to authenticated
 using ((select auth.uid()) = user_id);
+
+
+-- Question bank: questions are organized by lesson and owned by each user.
+create table if not exists public.pose_quiz_question_bank (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  lesson_name text not null default 'Chưa phân loại',
+  question jsonb not null,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists pose_quiz_question_bank_user_lesson_idx
+  on public.pose_quiz_question_bank(user_id, lesson_name);
+
+alter table public.pose_quiz_question_bank enable row level security;
+
+revoke all on table public.pose_quiz_question_bank from anon, authenticated;
+grant select, insert, update, delete on table public.pose_quiz_question_bank to authenticated;
+
+drop policy if exists "pose_quiz_bank_select_own" on public.pose_quiz_question_bank;
+create policy "pose_quiz_bank_select_own"
+on public.pose_quiz_question_bank
+for select
+to authenticated
+using ((select auth.uid()) = user_id);
+
+drop policy if exists "pose_quiz_bank_insert_own" on public.pose_quiz_question_bank;
+create policy "pose_quiz_bank_insert_own"
+on public.pose_quiz_question_bank
+for insert
+to authenticated
+with check ((select auth.uid()) = user_id);
+
+drop policy if exists "pose_quiz_bank_update_own" on public.pose_quiz_question_bank;
+create policy "pose_quiz_bank_update_own"
+on public.pose_quiz_question_bank
+for update
+to authenticated
+using ((select auth.uid()) = user_id)
+with check ((select auth.uid()) = user_id);
+
+drop policy if exists "pose_quiz_bank_delete_own" on public.pose_quiz_question_bank;
+create policy "pose_quiz_bank_delete_own"
+on public.pose_quiz_question_bank
+for delete
+to authenticated
+using ((select auth.uid()) = user_id);
