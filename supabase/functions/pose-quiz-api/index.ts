@@ -343,6 +343,36 @@ function randomCode() {
   return Array.from(bytes, (b) => alphabet[b % alphabet.length]).join("");
 }
 
+async function accessibleBankRows(userId: string) {
+  const groupIds = await accessibleGroupIds(userId);
+  const fields = "id,user_id,subject_name,lesson_name,visibility,group_id,question,created_at,updated_at";
+  const ownPromise = admin.from("pose_quiz_question_bank")
+    .select(fields)
+    .eq("user_id", userId);
+  const publicPromise = admin.from("pose_quiz_question_bank")
+    .select(fields)
+    .eq("visibility", "public");
+  const groupPromise = groupIds.length
+    ? admin.from("pose_quiz_question_bank")
+        .select(fields)
+        .eq("visibility", "group")
+        .in("group_id", groupIds)
+    : Promise.resolve({ data: [], error: null } as any);
+
+  const [own, pub, grp] = await Promise.all([ownPromise, publicPromise, groupPromise]);
+  if (own.error) throw own.error;
+  if (pub.error) throw pub.error;
+  if (grp.error) throw grp.error;
+
+  const map = new Map<string, any>();
+  for (const row of [...(own.data || []), ...(pub.data || []), ...(grp.data || [])]) {
+    map.set(row.id, row);
+  }
+  return [...map.values()].sort((a, b) =>
+    String(b.updated_at || b.created_at).localeCompare(String(a.updated_at || a.created_at))
+  );
+}
+
 async function parseJson(req: Request) {
   const type = req.headers.get("content-type") || "";
   if (!type.includes("application/json")) return {};
@@ -514,28 +544,60 @@ async function handleAction(action: string, body: any, user: any, req: Request) 
   }
 
   if (action === "bank.list") {
-    const groupIds = await accessibleGroupIds(userId);
-    const ownPromise = admin.from("pose_quiz_question_bank")
-      .select("id,user_id,subject_name,lesson_name,visibility,group_id,question,created_at,updated_at")
-      .eq("user_id", userId);
-    const publicPromise = admin.from("pose_quiz_question_bank")
-      .select("id,user_id,subject_name,lesson_name,visibility,group_id,question,created_at,updated_at")
-      .eq("visibility", "public");
-    const groupPromise = groupIds.length
-      ? admin.from("pose_quiz_question_bank")
-          .select("id,user_id,subject_name,lesson_name,visibility,group_id,question,created_at,updated_at")
-          .eq("visibility", "group").in("group_id", groupIds)
-      : Promise.resolve({ data: [], error: null } as any);
+    const allRows = await accessibleBankRows(userId);
+    const subjectFilter = String(body.subject_name || "ALL");
+    const lessonFilter = String(body.lesson_name || "ALL");
+    const sourceFilter = String(body.source || "ALL");
+    const keyword = String(body.search || "").trim().toLocaleLowerCase("vi");
 
-    const [own, pub, grp] = await Promise.all([ownPromise, publicPromise, groupPromise]);
-    if (own.error) throw own.error;
-    if (pub.error) throw pub.error;
-    if (grp.error) throw grp.error;
-    const map = new Map<string, any>();
-    for (const row of [...(own.data || []), ...(pub.data || []), ...(grp.data || [])]) map.set(row.id, row);
-    const rows = [...map.values()].sort((a, b) => String(b.updated_at).localeCompare(String(a.updated_at)));
-    const hydrated = await hydrateMedia(rows);
-    return { ok: true, items: hydrated };
+    const subjects = [...new Set(
+      allRows.map((row: any) => row.subject_name || "Chưa phân loại")
+    )].sort((a, b) => String(a).localeCompare(String(b), "vi"));
+
+    const lessonSource = subjectFilter === "ALL"
+      ? allRows
+      : allRows.filter((row: any) => (row.subject_name || "Chưa phân loại") === subjectFilter);
+    const lessons = [...new Set(
+      lessonSource.map((row: any) => row.lesson_name || "Chưa phân loại")
+    )].sort((a, b) => String(a).localeCompare(String(b), "vi"));
+
+    const rows = allRows.filter((row: any) => {
+      if (subjectFilter !== "ALL" && (row.subject_name || "Chưa phân loại") !== subjectFilter) return false;
+      if (lessonFilter !== "ALL" && (row.lesson_name || "Chưa phân loại") !== lessonFilter) return false;
+      if (sourceFilter === "MINE" && row.user_id !== userId) return false;
+      if (sourceFilter === "PUBLIC" && row.visibility !== "public") return false;
+      if (sourceFilter === "GROUP" && row.visibility !== "group") return false;
+      if (keyword && !String(row.question?.text || "").toLocaleLowerCase("vi").includes(keyword)) return false;
+      return true;
+    });
+
+    return {
+      ok: true,
+      items: await hydrateMedia(rows),
+      facets: { subjects, lessons },
+    };
+  }
+
+  if (action === "bank.resolve") {
+    const ids = Array.isArray(body.ids) ? body.ids.filter(Boolean).slice(0, 200) : [];
+    if (!ids.length) return { ok: true, questions: [] };
+
+    const accessible = await accessibleBankRows(userId);
+    const byId = new Map(accessible.map((row: any) => [row.id, row]));
+    const selected = ids
+      .map((id: string) => byId.get(id))
+      .filter(Boolean);
+
+    if (selected.length !== ids.length) {
+      throw Object.assign(new Error("Một hoặc nhiều câu hỏi không còn quyền truy cập."), { status: 403 });
+    }
+
+    const questions = selected.map((row: any) => ({
+      ...structuredClone(row.question),
+      id: crypto.randomUUID(),
+    }));
+
+    return { ok: true, questions: await hydrateMedia(questions) };
   }
 
   if (action === "bank.save") {
