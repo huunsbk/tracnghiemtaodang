@@ -1,0 +1,356 @@
+import { chromium } from 'playwright';
+
+const APP = process.env.APP_URL || 'http://127.0.0.1:4173/index.html';
+const SUPABASE_HOST = 'https://exfnarddchxzfewlztwb.supabase.co';
+const tinyPng = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9WlZkAAAAASUVORK5CYII=', 'base64');
+const tinyWav = Buffer.from('UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=', 'base64');
+
+const importedSettings = {
+  subject: 'Tin học',
+  title: 'Bài QA nhập file',
+  bankVisibility: 'private',
+  bankGroupId: '',
+  timeLimit: 30,
+  checkInterval: 3,
+  numAnswers: 4,
+  poseAssets: { NONE: null, RAISE_LEFT: null, RAISE_RIGHT: null, BOTH_UP: null, CROSS_ARMS: null },
+  questions: [{
+    id: 101,
+    text: 'Câu QA một câu',
+    image: null,
+    audio: { data: null, name: '' },
+    answers: [
+      { text: 'Đứng bình thường', pose: 'NONE', isCorrect: true, image: null },
+      { text: 'Giơ trái', pose: 'RAISE_LEFT', isCorrect: false, image: null },
+      { text: 'Giơ phải', pose: 'RAISE_RIGHT', isCorrect: false, image: null },
+      { text: 'Hai tay', pose: 'BOTH_UP', isCorrect: false, image: null }
+    ]
+  }],
+  audio: {
+    correct: { data: null, name: '' },
+    wrong: { data: null, name: '' },
+    bgm: { data: null, name: '' }
+  }
+};
+
+const state = {
+  groups: [],
+  lessons: [],
+  bank: [{
+    id: 'bank-seed',
+    user_id: 'other-user',
+    subject_name: 'Tin học',
+    lesson_name: 'Bài chia sẻ mẫu',
+    visibility: 'public',
+    group_id: null,
+    question: {
+      id: 88,
+      text: 'Câu hỏi công khai mẫu',
+      image: null,
+      audio: { data: null, name: '' },
+      answers: [
+        { text: 'Đúng', pose: 'NONE', isCorrect: true, image: null },
+        { text: 'Sai 1', pose: 'RAISE_LEFT', isCorrect: false, image: null },
+        { text: 'Sai 2', pose: 'RAISE_RIGHT', isCorrect: false, image: null },
+        { text: 'Sai 3', pose: 'BOTH_UP', isCorrect: false, image: null }
+      ]
+    },
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString()
+  }]
+};
+
+const browser = await chromium.launch({
+  headless: true,
+  args: [
+    '--use-fake-device-for-media-stream',
+    '--use-fake-ui-for-media-stream',
+    '--autoplay-policy=no-user-gesture-required'
+  ]
+});
+const context = await browser.newContext({ permissions: ['camera'] });
+const page = await context.newPage();
+const pageErrors = [];
+page.on('pageerror', e => pageErrors.push(String(e)));
+page.on('dialog', async d => { await d.accept(); });
+
+const session = {
+  access_token: 'qa-access-token',
+  token_type: 'bearer',
+  expires_in: 3600,
+  expires_at: Math.floor(Date.now()/1000)+3600,
+  refresh_token: 'qa-refresh-token',
+  user: {
+    id: 'qa-user',
+    aud: 'authenticated',
+    role: 'authenticated',
+    email: 'qa@example.com',
+    email_confirmed_at: new Date().toISOString(),
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+    app_metadata: { provider: 'email', providers: ['email'] },
+    user_metadata: {},
+    identities: []
+  }
+};
+
+await page.route(SUPABASE_HOST + '/auth/v1/**', async route => {
+  const url = route.request().url();
+  if (url.includes('/logout')) return route.fulfill({ status: 204, body: '' });
+  if (url.includes('/token')) {
+    return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(session) });
+  }
+  if (url.includes('/user')) {
+    return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(session.user) });
+  }
+  return route.fulfill({ status: 200, contentType: 'application/json', body: '{}' });
+});
+
+const ok = body => ({ status: 200, contentType: 'application/json', body: JSON.stringify({ ok: true, ...body }) });
+await page.route(SUPABASE_HOST + '/functions/v1/pose-quiz-api**', async route => {
+  const req = route.request();
+  const u = new URL(req.url());
+  const action = u.searchParams.get('action') || '';
+  let body = {};
+  if ((req.headers()['content-type'] || '').includes('application/json')) {
+    try { body = req.postDataJSON(); } catch {}
+  }
+
+  if (action === 'bootstrap' || action === 'health') return route.fulfill(ok({ version: 'qa' }));
+  if (action === 'groups.list') return route.fulfill(ok({ groups: state.groups }));
+  if (action === 'groups.create') {
+    const group = { id: 'g-owner', name: body.name || 'Nhóm QA', join_code: 'OWNR1234', owner_id: 'qa-user', is_owner: true, member_count: 1 };
+    state.groups = [group, ...state.groups.filter(g => g.id !== group.id)];
+    return route.fulfill(ok({ group }));
+  }
+  if (action === 'groups.join') {
+    const group = { id: 'g-member', name: 'Nhóm đã tham gia', join_code: String(body.code || 'TEAM1234'), owner_id: 'owner-2', is_owner: false, member_count: 2 };
+    state.groups = [...state.groups.filter(g => g.id !== group.id), group];
+    return route.fulfill(ok({ group }));
+  }
+  if (action === 'groups.delete' || action === 'groups.leave') {
+    state.groups = state.groups.filter(g => g.id !== body.group_id);
+    return route.fulfill(ok({}));
+  }
+  if (action === 'bank.list') return route.fulfill(ok({ items: state.bank }));
+  if (action === 'bank.save') {
+    for (const q of body.questions || []) {
+      state.bank.unshift({
+        id: 'bank-' + (state.bank.length + 1),
+        user_id: 'qa-user',
+        subject_name: body.subject_name,
+        lesson_name: body.lesson_name,
+        visibility: body.visibility,
+        group_id: body.group_id || null,
+        question: q,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      });
+    }
+    return route.fulfill(ok({ count: (body.questions || []).length }));
+  }
+  if (action === 'bank.delete') {
+    const ids = new Set(body.ids || []);
+    const before = state.bank.length;
+    state.bank = state.bank.filter(x => !(ids.has(x.id) && x.user_id === 'qa-user'));
+    return route.fulfill(ok({ count: before - state.bank.length }));
+  }
+  if (action === 'lessons.list') {
+    return route.fulfill(ok({ items: state.lessons.map(x => ({
+      id: x.id, subject_name: x.subject_name, title: x.title,
+      created_at: x.created_at, updated_at: x.updated_at,
+      question_count: x.data.questions?.length || 0
+    })) }));
+  }
+  if (action === 'lessons.save') {
+    const id = body.id || 'lesson-' + (state.lessons.length + 1);
+    const item = {
+      id,
+      subject_name: body.subject_name,
+      title: body.title,
+      data: body.data,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString()
+    };
+    state.lessons = [item, ...state.lessons.filter(x => x.id !== id)];
+    return route.fulfill(ok({ item }));
+  }
+  if (action === 'lessons.get') {
+    const item = state.lessons.find(x => x.id === body.id);
+    return route.fulfill(item ? ok({ item }) : { status: 404, contentType: 'application/json', body: JSON.stringify({ok:false,error:{message:'Not found'}}) });
+  }
+  if (action === 'lessons.delete') {
+    state.lessons = state.lessons.filter(x => x.id !== body.id);
+    return route.fulfill(ok({ id: body.id }));
+  }
+  if (action === 'media.upload') {
+    return route.fulfill(ok({ asset: {
+      storage: 'pose-quiz-media',
+      path: 'users/qa/media-' + Date.now(),
+      name: 'qa-media',
+      mime: 'image/png',
+      size: 68,
+      url: 'data:image/png;base64,' + tinyPng.toString('base64')
+    }}));
+  }
+  if (action === 'document.export') return route.fulfill(ok({ data: body.data || importedSettings }));
+  if (action === 'document.import') return route.fulfill(ok({ data: importedSettings }));
+  return route.fulfill({ status: 404, contentType: 'application/json', body: JSON.stringify({ok:false,error:{message:'Unknown mock action '+action}}) });
+});
+
+const pass = [];
+async function check(name, fn) {
+  try {
+    await fn();
+    pass.push('PASS ' + name);
+    console.log('PASS', name);
+  } catch (e) {
+    console.error('FAIL', name, e);
+    throw e;
+  }
+}
+const byButton = name => page.getByRole('button', { name, exact: true });
+const hasText = text => page.getByText(text, { exact: false }).first();
+
+await page.goto(APP, { waitUntil: 'networkidle', timeout: 90000 });
+
+await check('Auth screen renders', async () => {
+  await byButton('ĐĂNG NHẬP').waitFor();
+  await byButton('ĐĂNG KÝ').click();
+  await hasText('TẠO TÀI KHOẢN').waitFor();
+  await byButton('ĐĂNG NHẬP').click();
+});
+
+await check('Login reaches main menu and backend bootstrap', async () => {
+  await page.locator('input[type=email]').fill('qa@example.com');
+  await page.locator('input[type=password]').fill('Qa123456!');
+  await page.getByRole('button', { name: 'ĐĂNG NHẬP', exact: true }).last().click();
+  await byButton('BẮT ĐẦU').waitFor({ timeout: 30000 });
+});
+
+await check('Editor opens and basic fields work', async () => {
+  await byButton('✏️ SOẠN BÀI').click();
+  await hasText('THIẾT LẬP BÀI DẠY').waitFor();
+  await page.getByPlaceholder('Môn học (VD: Tin học)').fill('Tin học QA');
+  await page.getByPlaceholder('Tên bài dạy').fill('Bài kiểm thử UI');
+  await byButton('+ THÊM CÂU').click();
+  await hasText('CÂU HỎI 2').waitFor();
+});
+
+await check('Image and audio uploads call backend', async () => {
+  const imageInputs = page.locator('input[type=file][accept="image/*"]');
+  await imageInputs.nth(0).setInputFiles({ name: 'pose.png', mimeType: 'image/png', buffer: tinyPng });
+  await page.getByText('XÓA', { exact: true }).first().waitFor();
+
+  const audioInputs = page.locator('input[type=file][accept="audio/*"]');
+  await audioInputs.nth(0).setInputFiles({ name: 'bgm.wav', mimeType: 'audio/wav', buffer: tinyWav });
+  await page.getByText('NGHE THỬ', { exact: false }).first().waitFor();
+
+  await imageInputs.nth(5).setInputFiles({ name: 'question.png', mimeType: 'image/png', buffer: tinyPng });
+  await audioInputs.nth(3).setInputFiles({ name: 'question.wav', mimeType: 'audio/wav', buffer: tinyWav });
+  await hasText('question.wav').waitFor();
+});
+
+await check('Correct answer selector and bank save work', async () => {
+  const correctButtons = page.getByRole('button', { name: /CHỌN LÀM ĐÚNG/ });
+  if (await correctButtons.count()) await correctButtons.first().click();
+
+  const shareSelect = page.locator('select').filter({ hasText: 'Riêng tư — chỉ tôi' }).first();
+  await shareSelect.selectOption('public');
+  await byButton('LƯU CÂU NÀY VÀO KHO').click();
+});
+
+await check('Cloud save switches to update mode', async () => {
+  await byButton('LƯU CLOUD').click();
+  await byButton('CẬP NHẬT CLOUD').waitFor();
+});
+
+await check('JSON export and import buttons are wired', async () => {
+  const downloadPromise = page.waitForEvent('download');
+  await byButton('LƯU FILE (.JSON)').click();
+  await downloadPromise;
+
+  const jsonInput = page.locator('input[type=file][accept=".json"]');
+  await jsonInput.setInputFiles({ name: 'lesson.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(importedSettings)) });
+  await byButton('LƯU CLOUD').waitFor();
+});
+
+await check('Question bank filters, select and multi-import work', async () => {
+  await byButton('📚 KHO CÂU HỎI').click();
+  await hasText('Câu hỏi công khai mẫu').waitFor();
+  const sourceSelect = page.locator('select').filter({ hasText: 'Tất cả nguồn' }).first();
+  await sourceSelect.selectOption('PUBLIC');
+  await hasText('Câu hỏi công khai mẫu').waitFor();
+  await byButton('CHỌN TẤT CẢ').click();
+  await page.getByRole('button', { name: /THÊM .* CÂU VÀO BÀI ĐANG SOẠN/ }).click();
+  await hasText('THIẾT LẬP BÀI DẠY').waitFor();
+});
+
+await check('Group create, copy, join, delete and leave work', async () => {
+  await byButton('👥 NHÓM').click();
+  await hasText('NHÓM CHIA SẺ').waitFor();
+  await page.getByPlaceholder('Tên nhóm...').fill('Nhóm QA');
+  await byButton('TẠO').click();
+  await hasText('OWNR1234').waitFor();
+  await byButton('SAO CHÉP').click();
+
+  await page.getByPlaceholder('VD: A1B2C3D4').fill('TEAM1234');
+  await byButton('THAM GIA').click();
+  await hasText('Nhóm đã tham gia').waitFor();
+
+  await page.getByRole('button', { name: 'XÓA NHÓM', exact: true }).click();
+  await page.getByRole('button', { name: 'RỜI NHÓM', exact: true }).click();
+});
+
+await check('Cloud library new/open/delete work', async () => {
+  await byButton('← TRANG CHỦ').click();
+  await byButton('✏️ SOẠN BÀI').click();
+  await byButton('LƯU CLOUD').click();
+  await byButton('☁️ THƯ VIỆN').click();
+  await hasText('Bài QA nhập file').waitFor();
+  await byButton('MỞ').click();
+  await hasText('THIẾT LẬP BÀI DẠY').waitFor();
+  await byButton('☁️ THƯ VIỆN').click();
+  await byButton('XÓA').click();
+  await byButton('+ BÀI MỚI').click();
+  await page.getByPlaceholder('Tên bài dạy').waitFor();
+});
+
+await check('Editor top navigation buttons work', async () => {
+  await byButton('📚 KHO CÂU HỎI').click();
+  await byButton('← SOẠN BÀI').click();
+  await byButton('👥 NHÓM').click();
+  await byButton('← TRANG CHỦ').click();
+  await byButton('✏️ SOẠN BÀI').click();
+  await byButton('XONG').click();
+  await byButton('BẮT ĐẦU').waitFor();
+});
+
+await check('Game mute/check/result/replay buttons work', async () => {
+  await byButton('✏️ SOẠN BÀI').click();
+  const jsonInput = page.locator('input[type=file][accept=".json"]');
+  await jsonInput.setInputFiles({ name: 'single.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(importedSettings)) });
+  await byButton('XONG').click();
+  await byButton('BẮT ĐẦU').click();
+  await hasText('CÂU 1').waitFor({ timeout: 30000 });
+  await page.getByRole('button', { name: '🔊', exact: true }).click();
+  await byButton('KIỂM TRA').click();
+  await hasText('XUẤT SẮC!').waitFor({ timeout: 10000 });
+  await page.getByRole('button', { name: /CHƠI LẠI THÔI/i }).click();
+  await byButton('BẮT ĐẦU').waitFor();
+});
+
+await check('Logout returns to auth screen', async () => {
+  await byButton('ĐĂNG XUẤT').click();
+  await page.getByRole('button', { name: 'ĐĂNG NHẬP', exact: true }).first().waitFor();
+});
+
+if (pageErrors.length) {
+  console.error('PAGE_ERRORS', pageErrors);
+  throw new Error('Browser page errors detected: ' + pageErrors.join(' | '));
+}
+
+console.log('\nUI_SMOKE_OK');
+console.log(pass.join('\n'));
+await page.screenshot({ path: 'qa-ui-final.png', fullPage: true }).catch(() => {});
+await browser.close();
