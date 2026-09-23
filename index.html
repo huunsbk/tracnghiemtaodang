@@ -212,6 +212,162 @@
             );
         };
 
+
+        const QuestionBank = ({ setScreen, settings, setSettings }) => {
+            const [items, setItems] = useState([]);
+            const [loading, setLoading] = useState(true);
+            const [error, setError] = useState('');
+            const [lessonFilter, setLessonFilter] = useState('ALL');
+            const [searchText, setSearchText] = useState('');
+            const [selected, setSelected] = useState(() => new Set());
+
+            const load = async () => {
+                setLoading(true);
+                setError('');
+                const { data, error } = await supabaseClient
+                    .from('pose_quiz_question_bank')
+                    .select('id,lesson_name,question,created_at')
+                    .order('created_at', { ascending: false });
+                if (error) setError(error.message);
+                else setItems(data || []);
+                setLoading(false);
+            };
+
+            useEffect(() => { load(); }, []);
+
+            const lessons = useMemo(
+                () => [...new Set(items.map(item => item.lesson_name).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'vi')),
+                [items]
+            );
+
+            const visibleItems = useMemo(() => {
+                const keyword = searchText.trim().toLowerCase();
+                return items.filter(item => {
+                    const byLesson = lessonFilter === 'ALL' || item.lesson_name === lessonFilter;
+                    const byText = !keyword || (item.question?.text || '').toLowerCase().includes(keyword);
+                    return byLesson && byText;
+                });
+            }, [items, lessonFilter, searchText]);
+
+            const toggle = (id) => {
+                setSelected(prev => {
+                    const next = new Set(prev);
+                    if (next.has(id)) next.delete(id);
+                    else next.add(id);
+                    return next;
+                });
+            };
+
+            const toggleAllVisible = () => {
+                const ids = visibleItems.map(item => item.id);
+                const allSelected = ids.length > 0 && ids.every(id => selected.has(id));
+                setSelected(prev => {
+                    const next = new Set(prev);
+                    ids.forEach(id => allSelected ? next.delete(id) : next.add(id));
+                    return next;
+                });
+            };
+
+            const addSelectedToLesson = () => {
+                const chosen = items.filter(item => selected.has(item.id));
+                if (!chosen.length) return alert('Hãy chọn ít nhất một câu hỏi.');
+                const now = Date.now();
+                const imported = chosen.map((item, idx) => {
+                    const cloned = JSON.parse(JSON.stringify(item.question));
+                    return { ...cloned, id: now + idx };
+                });
+                setSettings({ ...settings, questions: [...settings.questions, ...imported] });
+                alert(`Đã thêm ${imported.length} câu hỏi vào bài đang soạn.`);
+                setScreen('EDITOR');
+            };
+
+            const deleteSelected = async () => {
+                const ids = [...selected];
+                if (!ids.length) return alert('Hãy chọn câu hỏi cần xóa.');
+                if (!confirm(`Xóa ${ids.length} câu khỏi kho câu hỏi?`)) return;
+                const { error } = await supabaseClient
+                    .from('pose_quiz_question_bank')
+                    .delete()
+                    .in('id', ids);
+                if (error) return alert(error.message);
+                setSelected(new Set());
+                load();
+            };
+
+            return (
+                <div className="w-full h-full bg-slate-50 flex flex-col text-slate-800">
+                    <div className="bg-violet-700 text-white px-8 py-5 flex items-center justify-between shadow-lg">
+                        <div>
+                            <h2 className="text-3xl font-black uppercase">📚 Kho câu hỏi</h2>
+                            <p className="text-violet-200 text-sm font-semibold">Lưu theo từng bài và chọn nhiều câu để đưa vào bài đang soạn</p>
+                        </div>
+                        <button onClick={() => setScreen('EDITOR')} className="bg-white/15 hover:bg-white/25 px-5 py-2 rounded-xl font-black">← QUAY LẠI SOẠN BÀI</button>
+                    </div>
+
+                    <div className="bg-white border-b border-slate-200 px-6 py-4">
+                        <div className="max-w-6xl mx-auto flex flex-wrap gap-3 items-center">
+                            <div className="text-sm font-black text-slate-600 mr-auto">
+                                Bài đang soạn: <span className="text-violet-700">{settings.title || 'Bài dạy chưa đặt tên'}</span>
+                            </div>
+                            <select value={lessonFilter} onChange={(e) => setLessonFilter(e.target.value)} className="px-4 py-2 rounded-xl border border-slate-200 bg-slate-50 font-bold text-sm">
+                                <option value="ALL">Tất cả bài</option>
+                                {lessons.map(lesson => <option key={lesson} value={lesson}>{lesson}</option>)}
+                            </select>
+                            <input value={searchText} onChange={(e) => setSearchText(e.target.value)} placeholder="Tìm nội dung câu hỏi..." className="w-64 max-w-full px-4 py-2 rounded-xl border border-slate-200 outline-none focus:border-violet-400 font-semibold text-sm" />
+                            <button onClick={toggleAllVisible} className="px-4 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 font-black text-sm">Chọn tất cả</button>
+                        </div>
+                    </div>
+
+                    <div className="flex-1 overflow-y-auto p-6">
+                        <div className="max-w-6xl mx-auto">
+                            {loading && <div className="text-center py-16 font-bold text-slate-500">Đang tải kho câu hỏi...</div>}
+                            {error && <div className="bg-red-50 border border-red-200 text-red-700 rounded-2xl p-5 font-bold">Không tải được kho câu hỏi: {error}<div className="text-xs mt-2">Hãy chạy lại file supabase-setup.sql đã cập nhật.</div></div>}
+                            {!loading && !error && visibleItems.length === 0 && (
+                                <div className="text-center bg-white rounded-3xl border-2 border-dashed border-slate-200 p-14 text-slate-500">
+                                    <div className="text-6xl mb-3">📭</div>
+                                    <div className="text-xl font-black">Chưa có câu hỏi phù hợp</div>
+                                    <p className="mt-2">Trong màn hình soạn bài, dùng nút “Lưu câu vào kho” hoặc “Lưu tất cả vào kho”.</p>
+                                </div>
+                            )}
+
+                            <div className="space-y-3 pb-24">
+                                {visibleItems.map((item, idx) => {
+                                    const isSelected = selected.has(item.id);
+                                    const correct = item.question?.answers?.find(ans => ans.isCorrect);
+                                    return (
+                                        <button key={item.id} onClick={() => toggle(item.id)} className={`w-full text-left bg-white border-2 rounded-2xl p-4 shadow-sm transition-all ${isSelected ? 'border-violet-500 ring-4 ring-violet-100' : 'border-slate-100 hover:border-violet-200'}`}>
+                                            <div className="flex gap-4 items-start">
+                                                <div className={`w-7 h-7 rounded-lg border-2 flex items-center justify-center flex-shrink-0 font-black ${isSelected ? 'bg-violet-600 border-violet-600 text-white' : 'border-slate-300 text-transparent'}`}>✓</div>
+                                                <div className="flex-1 min-w-0">
+                                                    <div className="flex flex-wrap gap-2 items-center mb-2">
+                                                        <span className="bg-violet-50 text-violet-700 px-2 py-1 rounded-lg text-[10px] font-black uppercase">{item.lesson_name}</span>
+                                                        <span className="text-[10px] text-slate-400 font-bold">Câu {idx + 1}</span>
+                                                    </div>
+                                                    <div className="text-base font-black text-slate-800">{item.question?.text || 'Câu hỏi không có nội dung'}</div>
+                                                    {correct && <div className="mt-2 text-xs font-bold text-emerald-600">Đáp án đúng: {correct.text}</div>}
+                                                </div>
+                                                {item.question?.image && <img src={item.question.image} className="w-20 h-20 object-contain rounded-xl border border-slate-100 bg-slate-50" />}
+                                            </div>
+                                        </button>
+                                    );
+                                })}
+                            </div>
+                        </div>
+                    </div>
+
+                    <div className="absolute bottom-0 left-0 right-0 bg-white/95 backdrop-blur border-t border-slate-200 px-6 py-4 shadow-2xl">
+                        <div className="max-w-6xl mx-auto flex items-center justify-between gap-4">
+                            <div className="font-black text-slate-600">Đã chọn: <span className="text-violet-700 text-xl">{selected.size}</span> câu</div>
+                            <div className="flex gap-3">
+                                <button onClick={deleteSelected} disabled={!selected.size} className="px-5 py-3 rounded-xl bg-red-50 text-red-600 border border-red-100 font-black disabled:opacity-40">Xóa khỏi kho</button>
+                                <button onClick={addSelectedToLesson} disabled={!selected.size} className="px-7 py-3 rounded-xl bg-violet-600 text-white font-black shadow-lg disabled:opacity-40">+ Thêm {selected.size || ''} câu vào bài đang soạn</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
         const App = () => {
             const [screen, setScreen] = useState('MENU');
             const [errorMsg, setErrorMsg] = useState(null);
@@ -291,6 +447,28 @@
                 return (str.length * 2) / (1024 * 1024);
             }, [settings]);
 
+            const saveQuestionsToBank = async (questions) => {
+                if (!session?.user) return alert('Vui lòng đăng nhập lại.');
+                const lessonName = (settings.title || 'Chưa phân loại').trim() || 'Chưa phân loại';
+                if (!questions?.length) return alert('Không có câu hỏi để lưu.');
+
+                const payload = questions.map(question => ({
+                    user_id: session.user.id,
+                    lesson_name: lessonName,
+                    question: JSON.parse(JSON.stringify(question))
+                }));
+
+                const { error } = await supabaseClient
+                    .from('pose_quiz_question_bank')
+                    .insert(payload);
+
+                if (error) {
+                    alert('Không lưu được vào kho câu hỏi: ' + error.message);
+                    return;
+                }
+                alert(`Đã lưu ${questions.length} câu vào kho “${lessonName}”.`);
+            };
+
             const saveToCloud = async () => {
                 if (!session?.user) return alert('Vui lòng đăng nhập lại.');
                 const payload = {
@@ -341,8 +519,9 @@
                     )}
                     {screen === 'MENU' && <MainMenu setScreen={setScreen} user={session.user} onSignOut={() => supabaseClient.auth.signOut()} />}
                     {screen === 'GAME' && <Game settings={settings} setScreen={setScreen} setScore={setScore} />}
-                    {screen === 'EDITOR' && <Editor settings={settings} setSettings={setSettings} setScreen={setScreen} usage={storageUsage} onSaveCloud={saveToCloud} onOpenCloud={() => setScreen('CLOUD')} cloudId={cloudId} />}
+                    {screen === 'EDITOR' && <Editor settings={settings} setSettings={setSettings} setScreen={setScreen} usage={storageUsage} onSaveCloud={saveToCloud} onOpenCloud={() => setScreen('CLOUD')} onOpenBank={() => setScreen('BANK')} onSaveQuestionsToBank={saveQuestionsToBank} cloudId={cloudId} />}
                     {screen === 'CLOUD' && <CloudLibrary setScreen={setScreen} setSettings={setSettings} setCloudId={setCloudId} />}
+                    {screen === 'BANK' && <QuestionBank setScreen={setScreen} settings={settings} setSettings={setSettings} />}
                     {screen === 'RESULT' && <Result score={score} total={settings.questions.length} setScreen={setScreen} />}
                 </div>
             );
@@ -568,7 +747,7 @@
             );
         };
 
-        const Editor = ({ settings, setSettings, setScreen, usage, onSaveCloud, onOpenCloud, cloudId }) => {
+        const Editor = ({ settings, setSettings, setScreen, usage, onSaveCloud, onOpenCloud, onOpenBank, onSaveQuestionsToBank, cloudId }) => {
             const [qIdx, setQIdx] = useState(0);
             const q = settings.questions[qIdx] || settings.questions[0];
 
@@ -628,6 +807,7 @@
                             </div>
                         </div>
                         <div className="flex gap-2 flex-wrap justify-end">
+                            <button onClick={onOpenBank} className="bg-violet-600 text-white px-4 py-2 rounded-xl font-bold text-xs uppercase hover:bg-violet-700 shadow-md">📚 Kho câu hỏi</button>
                             <button onClick={onOpenCloud} className="bg-sky-500 text-white px-4 py-2 rounded-xl font-bold text-xs uppercase hover:bg-sky-600 shadow-md">☁️ Thư viện</button>
                             <button onClick={onSaveCloud} className="bg-emerald-600 text-white px-4 py-2 rounded-xl font-bold text-xs uppercase hover:bg-emerald-700 shadow-md">{cloudId ? 'Cập nhật cloud' : 'Lưu cloud'}</button>
                             <button onClick={exportData} className="bg-blue-500 text-white px-4 py-2 rounded-xl font-bold text-xs uppercase hover:bg-blue-600 shadow-md">Lưu file (.json)</button>
@@ -704,6 +884,11 @@
                                         <button key={i} onClick={() => setQIdx(i)} className={`w-full p-3 rounded-xl font-black text-xs transition-all ${qIdx === i ? 'bg-indigo-600 text-white shadow-lg' : 'bg-slate-50 text-slate-500'}`}>CÂU HỎI {i + 1}</button>
                                     ))}
                                     <button onClick={() => setSettings({...settings, questions: [...settings.questions, { id: Date.now(), text: "Em hãy tạo dáng mới nào!", answers: Array(4).fill(0).map((_, idx) => ({ text: `Đáp án ${idx + 1}`, pose: "NONE", isCorrect: idx === 0, image: null })) }]})} className="p-3 border-2 border-dashed border-indigo-200 text-indigo-600 rounded-xl font-black text-xs hover:bg-indigo-50">+ Thêm câu</button>
+                                    <div className="grid grid-cols-1 gap-2 pt-2 border-t border-slate-100">
+                                        <button disabled={!q} onClick={() => q && onSaveQuestionsToBank([q])} className="p-2.5 bg-violet-50 text-violet-700 border border-violet-100 rounded-xl font-black text-[10px] uppercase disabled:opacity-40">Lưu câu này vào kho</button>
+                                        <button onClick={() => onSaveQuestionsToBank(settings.questions)} className="p-2.5 bg-violet-600 text-white rounded-xl font-black text-[10px] uppercase shadow-sm">Lưu tất cả vào kho</button>
+                                        <button onClick={onOpenBank} className="p-2.5 bg-white text-violet-700 border-2 border-violet-200 rounded-xl font-black text-[10px] uppercase">Mở kho để lấy nhiều câu</button>
+                                    </div>
                                 </div>
                             </section>
                         </div>
