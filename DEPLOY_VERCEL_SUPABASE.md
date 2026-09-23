@@ -11,7 +11,7 @@ Project đã cấu hình trong `supabase-config.js` là **MotionClass**.
    - Redirect URLs: thêm URL Vercel và (nếu vẫn dùng) `https://huunsbk.github.io/tracnghiemtaodang/`.
 4. Email/Password Auth được dùng cho đăng ký và đăng nhập.
 
-Bảng `public.pose_quiz_sets` bật RLS. Mỗi người dùng chỉ được SELECT/INSERT/UPDATE/DELETE dữ liệu có `user_id = auth.uid()`.
+Hai bảng `public.pose_quiz_sets` và `public.pose_quiz_question_bank` đều bật RLS. Mỗi người dùng chỉ được SELECT/INSERT/UPDATE/DELETE dữ liệu có `user_id = auth.uid()`.
 
 > `supabase-config.js` chỉ chứa **publishable key**, không chứa service role/secret key.
 
@@ -38,6 +38,10 @@ Sau khi merge PR vào `main`:
 - Cập nhật bản đã lưu.
 - Thư viện đám mây.
 - Mở lại và xóa bài dạy.
+- Kho câu hỏi riêng theo từng bài.
+- Lưu một câu hoặc toàn bộ câu của bài hiện tại vào kho.
+- Lọc kho theo bài, tìm nội dung, chọn nhiều câu và thêm hàng loạt vào bài đang soạn.
+- Xóa nhiều câu khỏi kho.
 - Vẫn giữ localStorage và xuất/nhập JSON để dùng dự phòng.
 
 ## 4. Kiểm thử sau triển khai
