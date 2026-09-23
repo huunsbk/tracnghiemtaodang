@@ -28,6 +28,9 @@ create table if not exists public.pose_quiz_groups (
   created_at timestamptz not null default now()
 );
 
+create index if not exists pose_quiz_groups_owner_idx
+  on public.pose_quiz_groups(owner_id);
+
 create table if not exists public.pose_quiz_group_members (
   group_id uuid not null references public.pose_quiz_groups(id) on delete cascade,
   user_id uuid not null references auth.users(id) on delete cascade,
@@ -62,6 +65,9 @@ alter table public.pose_quiz_question_bank
 alter table public.pose_quiz_question_bank
   add constraint pose_quiz_question_bank_visibility_check
   check (visibility in ('private', 'public', 'group'));
+
+create index if not exists pose_quiz_question_bank_user_idx
+  on public.pose_quiz_question_bank(user_id);
 
 create index if not exists pose_quiz_question_bank_subject_lesson_idx
   on public.pose_quiz_question_bank(subject_name, lesson_name);
