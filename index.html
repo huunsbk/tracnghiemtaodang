@@ -968,33 +968,57 @@
             }, [qIndex, currentQuestion?.audio?.data, isMuted]);
 
             useEffect(() => {
+                if (!gameReady) return;
+                const videoElement = videoRef.current;
+                if (!videoElement) return;
+
                 isMounted.current = true;
                 const initPose = async () => {
-                    poseRef.current = new Pose({ 
-                        locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}` 
-                    });
-                    poseRef.current.setOptions({ modelComplexity: 1, smoothLandmarks: true, minDetectionConfidence: 0.5, minTrackingConfidence: 0.5 });
-                    poseRef.current.onResults((results) => {
-                        if (!isMounted.current || !canvasRef.current) return;
-                        const canvasCtx = canvasRef.current.getContext('2d');
-                        canvasCtx.save();
-                        canvasCtx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
-                        if (results.poseLandmarks) {
-                            drawConnectors(canvasCtx, results.poseLandmarks, POSE_CONNECTIONS, {color: '#6366f1', lineWidth: 3});
-                            drawLandmarks(canvasCtx, results.poseLandmarks, { color: '#f43f5e', lineWidth: 1, radius: 3 });
-                            setDetectedPose(analyzePose(results.poseLandmarks));
-                        }
-                        canvasCtx.restore();
-                    });
-                    cameraRef.current = new Camera(videoRef.current, {
-                        onFrame: async () => { if (isMounted.current && poseRef.current) await poseRef.current.send({image: videoRef.current}); },
-                        width: 640, height: 480
-                    });
-                    cameraRef.current.start();
+                    try {
+                        poseRef.current = new Pose({ 
+                            locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}` 
+                        });
+                        poseRef.current.setOptions({ modelComplexity: 1, smoothLandmarks: true, minDetectionConfidence: 0.5, minTrackingConfidence: 0.5 });
+                        poseRef.current.onResults((results) => {
+                            if (!isMounted.current || !canvasRef.current) return;
+                            const canvasCtx = canvasRef.current.getContext('2d');
+                            canvasCtx.save();
+                            canvasCtx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
+                            if (results.poseLandmarks) {
+                                drawConnectors(canvasCtx, results.poseLandmarks, POSE_CONNECTIONS, {color: '#6366f1', lineWidth: 3});
+                                drawLandmarks(canvasCtx, results.poseLandmarks, { color: '#f43f5e', lineWidth: 1, radius: 3 });
+                                setDetectedPose(analyzePose(results.poseLandmarks));
+                            }
+                            canvasCtx.restore();
+                        });
+                        if (!isMounted.current) return;
+                        cameraRef.current = new Camera(videoElement, {
+                            onFrame: async () => {
+                                if (isMounted.current && poseRef.current && videoRef.current) {
+                                    await poseRef.current.send({image: videoRef.current});
+                                }
+                            },
+                            width: 640, height: 480
+                        });
+                        await cameraRef.current.start();
+                        if (!isMounted.current && cameraRef.current) cameraRef.current.stop();
+                    } catch (err) {
+                        if (isMounted.current) console.warn('Camera/Pose init failed:', err);
+                    }
                 };
                 initPose();
-                return () => { isMounted.current = false; if (cameraRef.current) cameraRef.current.stop(); if (poseRef.current) poseRef.current.close(); };
-            }, []);
+                return () => {
+                    isMounted.current = false;
+                    if (cameraRef.current) {
+                        try { cameraRef.current.stop(); } catch (_) {}
+                        cameraRef.current = null;
+                    }
+                    if (poseRef.current) {
+                        try { poseRef.current.close(); } catch (_) {}
+                        poseRef.current = null;
+                    }
+                };
+            }, [gameReady]);
 
             useEffect(() => {
                 if (!gameReady || gameError || feedback) return;
