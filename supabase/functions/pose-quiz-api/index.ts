@@ -3,7 +3,7 @@ import { createClient } from "npm:@supabase/supabase-js@2.116.0";
 const BUCKET = "pose-quiz-media";
 const MAX_MEDIA_BYTES = 20 * 1024 * 1024;
 const SIGNED_URL_TTL = 60 * 60;
-const SCHEMA_VERSION = "2026-09-23-backend-v1";
+const SCHEMA_VERSION = "2026-09-23-account-v2";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -31,6 +31,81 @@ function getSecretKey() {
 const admin = createClient(supabaseUrl, getSecretKey(), {
   auth: { persistSession: false, autoRefreshToken: false },
 });
+
+function getPublicKey() {
+  const key = Deno.env.get("SUPABASE_ANON_KEY");
+  if (!key) throw new Error("Missing Supabase public key");
+  return key;
+}
+
+function bearerToken(req: Request) {
+  return (req.headers.get("Authorization") || "").replace(/^Bearer\s+/i, "").trim();
+}
+
+async function authUserRequest(req: Request, path: string, body: any) {
+  const token = bearerToken(req);
+  if (!token) throw Object.assign(new Error("Chưa đăng nhập."), { status: 401 });
+  const response = await fetch(`${supabaseUrl}/auth/v1/${path}`, {
+    method: path === "user" ? "PUT" : "POST",
+    headers: {
+      apikey: getPublicKey(),
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+  let payload: any = {};
+  try { payload = await response.json(); } catch (_) {}
+  if (!response.ok) {
+    const message = payload?.msg || payload?.message || payload?.error_description || payload?.error || "Xác thực không thành công.";
+    const err: any = new Error(message);
+    err.status = response.status;
+    err.authCode = payload?.code || payload?.error_code || null;
+    throw err;
+  }
+  return payload;
+}
+
+function normalizePhone(value: string) {
+  let phone = String(value || "").trim().replace(/[\s().-]/g, "");
+  if (phone.startsWith("00")) phone = "+" + phone.slice(2);
+  if (phone.startsWith("0")) phone = "+84" + phone.slice(1);
+  if (!phone.startsWith("+")) throw Object.assign(new Error("Số điện thoại cần ở dạng 0xxxxxxxxx hoặc +mã_quốc_gia."), { status: 400 });
+  if (!/^\+[1-9]\d{7,14}$/.test(phone)) {
+    throw Object.assign(new Error("Số điện thoại không hợp lệ."), { status: 400 });
+  }
+  return phone;
+}
+
+async function ensureProfile(userId: string) {
+  const { data, error } = await admin.from("pose_quiz_profiles")
+    .upsert({ user_id: userId, updated_at: new Date().toISOString() }, { onConflict: "user_id" })
+    .select("user_id,display_name,school_name,avatar_path,created_at,updated_at")
+    .single();
+  if (error) throw error;
+  return data;
+}
+
+async function profilePayload(user: any) {
+  const profile = await ensureProfile(user.id);
+  let avatarUrl: string | null = null;
+  if (profile.avatar_path) {
+    const signed = await signPaths([profile.avatar_path]);
+    avatarUrl = signed.get(profile.avatar_path) || null;
+  }
+  return {
+    user_id: user.id,
+    email: user.email || "",
+    email_confirmed: !!user.email_confirmed_at,
+    phone: user.phone || "",
+    phone_confirmed: !!user.phone_confirmed_at,
+    display_name: profile.display_name || "",
+    school_name: profile.school_name || "",
+    avatar_path: profile.avatar_path || null,
+    avatar_url: avatarUrl,
+    updated_at: profile.updated_at,
+  };
+}
 
 const GAME_TOKEN_TTL_SECONDS = 2 * 60 * 60;
 const textEncoder = new TextEncoder();
@@ -451,6 +526,113 @@ async function handleAction(action: string, body: any, user: any, req: Request) 
 
   if (action === "bootstrap" || action === "health") {
     return { ok: true, version: SCHEMA_VERSION, user: { id: user.id, email: user.email } };
+  }
+
+  if (action === "account.profile.get") {
+    return { ok: true, profile: await profilePayload(user) };
+  }
+
+  if (action === "account.profile.update") {
+    const displayName = String(body.display_name || "").trim();
+    const schoolName = String(body.school_name || "").trim();
+    if (displayName.length > 120) throw Object.assign(new Error("Tên hiển thị tối đa 120 ký tự."), { status: 400 });
+    if (schoolName.length > 240) throw Object.assign(new Error("Tên trường tối đa 240 ký tự."), { status: 400 });
+    const { error } = await admin.from("pose_quiz_profiles").upsert({
+      user_id: userId,
+      display_name: displayName,
+      school_name: schoolName,
+      updated_at: new Date().toISOString(),
+    }, { onConflict: "user_id" });
+    if (error) throw error;
+    const { data: fresh, error: userError } = await admin.auth.admin.getUserById(userId);
+    if (userError || !fresh.user) throw userError || new Error("Không tải lại được tài khoản.");
+    return { ok: true, profile: await profilePayload(fresh.user) };
+  }
+
+  if (action === "account.avatar.upload") {
+    const form = await req.formData();
+    const file = form.get("file");
+    if (!(file instanceof File)) throw Object.assign(new Error("Không tìm thấy ảnh đại diện."), { status: 400 });
+    if (!String(file.type || "").startsWith("image/")) {
+      throw Object.assign(new Error("Ảnh đại diện phải là tệp ảnh."), { status: 415 });
+    }
+    if (file.size > 5 * 1024 * 1024) {
+      throw Object.assign(new Error("Ảnh đại diện tối đa 5 MB."), { status: 413 });
+    }
+    const previous = await ensureProfile(userId);
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    const asset = await uploadBytes(userId, bytes, file.type || "image/jpeg", file.name || "avatar.jpg");
+    const { error } = await admin.from("pose_quiz_profiles").upsert({
+      user_id: userId,
+      avatar_path: asset.path,
+      updated_at: new Date().toISOString(),
+    }, { onConflict: "user_id" });
+    if (error) {
+      await admin.storage.from(BUCKET).remove([asset.path]);
+      await admin.from("pose_quiz_media").delete().eq("storage_path", asset.path);
+      throw error;
+    }
+    if (previous.avatar_path && previous.avatar_path !== asset.path) {
+      await admin.storage.from(BUCKET).remove([previous.avatar_path]);
+      await admin.from("pose_quiz_media").delete().eq("storage_path", previous.avatar_path);
+    }
+    const { data: fresh } = await admin.auth.admin.getUserById(userId);
+    return { ok: true, profile: await profilePayload(fresh.user || user) };
+  }
+
+  if (action === "account.avatar.delete") {
+    const previous = await ensureProfile(userId);
+    const { error } = await admin.from("pose_quiz_profiles")
+      .update({ avatar_path: null, updated_at: new Date().toISOString() })
+      .eq("user_id", userId);
+    if (error) throw error;
+    if (previous.avatar_path) {
+      await admin.storage.from(BUCKET).remove([previous.avatar_path]);
+      await admin.from("pose_quiz_media").delete().eq("storage_path", previous.avatar_path);
+    }
+    const { data: fresh } = await admin.auth.admin.getUserById(userId);
+    return { ok: true, profile: await profilePayload(fresh.user || user) };
+  }
+
+  if (action === "account.password.change") {
+    const currentPassword = String(body.current_password || "");
+    const newPassword = String(body.new_password || "");
+    if (newPassword.length < 8) throw Object.assign(new Error("Mật khẩu mới cần ít nhất 8 ký tự."), { status: 400 });
+    if (currentPassword === newPassword) throw Object.assign(new Error("Mật khẩu mới phải khác mật khẩu hiện tại."), { status: 400 });
+    await authUserRequest(req, "user", {
+      email: user.email,
+      current_password: currentPassword,
+      password: newPassword,
+    });
+    return { ok: true, message: "Đã đổi mật khẩu." };
+  }
+
+  if (action === "account.phone.begin") {
+    const phone = normalizePhone(body.phone);
+    try {
+      await authUserRequest(req, "user", { phone });
+    } catch (err) {
+      const msg = String((err as any)?.message || "");
+      if (/sms|phone provider|unsupported|not enabled|provider/i.test(msg)) {
+        throw Object.assign(new Error("Dịch vụ SMS chưa được cấu hình hoặc chưa sẵn sàng trên Supabase."), { status: 503 });
+      }
+      throw err;
+    }
+    return { ok: true, phone, message: "Đã gửi mã OTP đến số điện thoại mới." };
+  }
+
+  if (action === "account.phone.verify") {
+    const phone = normalizePhone(body.phone);
+    const token = String(body.token || "").trim();
+    if (!/^\d{6,10}$/.test(token)) throw Object.assign(new Error("Mã OTP không hợp lệ."), { status: 400 });
+    try {
+      await authUserRequest(req, "verify", { phone, token, type: "phone_change" });
+    } catch (err) {
+      throw Object.assign(new Error("Mã OTP không đúng hoặc đã hết hạn."), { status: (err as any)?.status || 400 });
+    }
+    const { data: fresh, error } = await admin.auth.admin.getUserById(userId);
+    if (error || !fresh.user) throw error || new Error("Không tải lại được tài khoản.");
+    return { ok: true, profile: await profilePayload(fresh.user) };
   }
 
   if (action === "game.start") {
