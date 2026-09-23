@@ -69,6 +69,18 @@ const browser = await chromium.launch({
   ]
 });
 const context = await browser.newContext({ permissions: ['camera'] });
+if (APP.includes('githack.com')) {
+  const host = new URL(APP).hostname;
+  await context.addCookies([{
+    name: '__Http-phish',
+    value: '1',
+    domain: host,
+    path: '/',
+    secure: true,
+    httpOnly: false,
+    sameSite: 'Lax'
+  }]);
+}
 const page = await context.newPage();
 const pageErrors = [];
 page.on('pageerror', e => pageErrors.push(String(e)));
