@@ -268,6 +268,83 @@ function isAsset(value: any) {
   return !!value && typeof value === "object" && typeof value.path === "string" && value.storage === BUCKET;
 }
 
+function ensureSettingsShape(input: any) {
+  const data = input && typeof input === "object" ? input : {};
+  const poseAssets = data.poseAssets && typeof data.poseAssets === "object" ? data.poseAssets : {};
+  const globalAudio = data.audio && typeof data.audio === "object" ? data.audio : {};
+  const questions = Array.isArray(data.questions) && data.questions.length
+    ? data.questions
+    : [{
+        id: Date.now(),
+        text: "Nhập nội dung câu hỏi...",
+        image: null,
+        audio: { data: null, name: "" },
+        answers: Array.from({ length: 4 }, (_, idx) => ({
+          text: `Đáp án ${idx + 1}`,
+          pose: "NONE",
+          isCorrect: idx === 0,
+          image: null,
+        })),
+      }];
+
+  return {
+    ...data,
+    subject: String(data.subject || "Chưa phân loại"),
+    title: String(data.title || "Bài dạy chưa đặt tên"),
+    bankVisibility: ["private", "public", "group"].includes(data.bankVisibility)
+      ? data.bankVisibility
+      : "private",
+    bankGroupId: data.bankGroupId || "",
+    timeLimit: Number(data.timeLimit || 20),
+    checkInterval: Number(data.checkInterval || 3),
+    numAnswers: Number(data.numAnswers || 4),
+    poseAssets: {
+      NONE: poseAssets.NONE || null,
+      RAISE_LEFT: poseAssets.RAISE_LEFT || null,
+      RAISE_RIGHT: poseAssets.RAISE_RIGHT || null,
+      BOTH_UP: poseAssets.BOTH_UP || null,
+      CROSS_ARMS: poseAssets.CROSS_ARMS || null,
+    },
+    questions: questions.map((question: any, qIdx: number) => {
+      const answers = Array.isArray(question?.answers) ? question.answers : [];
+      return {
+        ...question,
+        id: question?.id || Date.now() + qIdx,
+        text: String(question?.text || "Nhập nội dung câu hỏi..."),
+        image: question?.image || null,
+        audio: {
+          data: question?.audio?.data || null,
+          name: question?.audio?.name || "",
+        },
+        answers: Array.from({ length: Math.max(4, answers.length) }, (_, idx) => {
+          const answer = answers[idx] || {};
+          return {
+            ...answer,
+            text: String(answer.text || `Đáp án ${idx + 1}`),
+            pose: answer.pose || "NONE",
+            isCorrect: typeof answer.isCorrect === "boolean" ? answer.isCorrect : idx === 0,
+            image: answer.image || null,
+          };
+        }),
+      };
+    }),
+    audio: {
+      correct: {
+        data: globalAudio.correct?.data || null,
+        name: globalAudio.correct?.name || "",
+      },
+      wrong: {
+        data: globalAudio.wrong?.data || null,
+        name: globalAudio.wrong?.name || "",
+      },
+      bgm: {
+        data: globalAudio.bgm?.data || null,
+        name: globalAudio.bgm?.name || "",
+      },
+    },
+  };
+}
+
 async function normalizeMedia(value: any, userId: string, hint = "asset"): Promise<any> {
   if (typeof value === "string") {
     if (value.startsWith("data:image/") || value.startsWith("data:audio/")) {
@@ -419,16 +496,17 @@ async function handleAction(action: string, body: any, user: any, req: Request) 
       .maybeSingle();
     if (error) throw error;
     if (!data) throw Object.assign(new Error("Không tìm thấy bài dạy."), { status: 404 });
-    return { ok: true, item: { ...data, data: await hydrateMedia(data.data) } };
+    return { ok: true, item: { ...data, data: await hydrateMedia(ensureSettingsShape(data.data)) } };
   }
 
   if (action === "lessons.save") {
     const id = body.id || null;
     const subjectName = String(body.subject_name || body.data?.subject || "Chưa phân loại").trim() || "Chưa phân loại";
     const title = String(body.title || body.data?.title || "Bài dạy chưa đặt tên").trim() || "Bài dạy chưa đặt tên";
-    const normalized = await normalizeMedia(body.data || {}, userId, "lesson");
-    normalized.subject = subjectName;
-    normalized.title = title;
+    const shaped = ensureSettingsShape(body.data || {});
+    shaped.subject = subjectName;
+    shaped.title = title;
+    const normalized = await normalizeMedia(shaped, userId, "lesson");
 
     let saved;
     if (id) {
@@ -620,12 +698,12 @@ async function handleAction(action: string, body: any, user: any, req: Request) 
     try { parsed = JSON.parse(text); } catch (_) {
       throw Object.assign(new Error("File JSON không hợp lệ."), { status: 400 });
     }
-    const normalized = await normalizeMedia(parsed, userId, "import");
+    const normalized = await normalizeMedia(ensureSettingsShape(parsed), userId, "import");
     return { ok: true, data: await hydrateMedia(normalized) };
   }
 
   if (action === "document.export") {
-    const normalized = await normalizeMedia(body.data || {}, userId, "export");
+    const normalized = await normalizeMedia(ensureSettingsShape(body.data || {}), userId, "export");
     return { ok: true, data: normalized };
   }
 
