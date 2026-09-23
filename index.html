@@ -88,8 +88,6 @@
             return result;
         };
 
-        const STORAGE_KEY = 'pose_game_data_v9_9_stable';
-
         const DEFAULT_POSE_CONFIG = {
             NONE: { label: 'Bình thường', icon: '🧍' },
             RAISE_LEFT: { label: 'Giơ tay trái', icon: '🙋‍♂️' },
@@ -141,7 +139,7 @@
                         const { data, error } = await supabaseClient.auth.signUp({
                             email,
                             password,
-                            options: { emailRedirectTo: window.location.origin }
+                            options: { emailRedirectTo: window.location.href.split(/[?#]/)[0] }
                         });
                         if (error) throw error;
                         if (!data.session) {
