@@ -1,6 +1,7 @@
 -- AI Pose Quiz backend schema fallback
--- Normally pose-quiz-api bootstraps this schema automatically on first authenticated request.
--- Use this file only as a manual fallback in Supabase SQL Editor.
+-- Schema is applied separately from the Edge Function runtime.
+-- pose-quiz-api only verifies/creates the private Storage bucket at runtime.
+-- Use this file as the canonical schema definition for restore/synchronization.
 -- IMPORTANT: browser roles anon/authenticated are deliberately revoked from business tables.
 
 
