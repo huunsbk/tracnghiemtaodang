@@ -117,6 +117,34 @@ await page.route(SUPABASE_HOST + '/functions/v1/pose-quiz-api**', async route =>
   }
 
   if (action === 'bootstrap' || action === 'health') return route.fulfill(ok({ version: 'qa' }));
+  if (action === 'game.start') {
+    const questions = body.data?.questions || [];
+    state.game = {
+      index: 0,
+      score: 0,
+      total: questions.length,
+      correct: questions.map(q => (q.answers || []).find(a => a.isCorrect)?.pose || 'NONE')
+    };
+    return route.fulfill(ok({ game_token: 'mock-game-token-0', index: 0, score: 0, total: state.game.total }));
+  }
+  if (action === 'game.check') {
+    const game = state.game || { index: 0, score: 0, total: 1, correct: ['NONE'] };
+    const correct = String(body.detected_pose || 'NONE') === String(game.correct[game.index] || 'NONE');
+    if (correct) game.score += 1;
+    const nextIndex = game.index + 1;
+    const finished = nextIndex >= game.total;
+    if (!finished) game.index = nextIndex;
+    state.game = game;
+    return route.fulfill(ok({
+      correct,
+      feedback: correct ? 'correct' : 'wrong',
+      score: game.score,
+      total: game.total,
+      finished,
+      next_index: finished ? game.index : nextIndex,
+      game_token: finished ? null : 'mock-game-token-' + nextIndex
+    }));
+  }
   if (action === 'groups.list') return route.fulfill(ok({ groups: state.groups }));
   if (action === 'groups.create') {
     const group = { id: 'g-owner', name: body.name || 'Nhóm QA', join_code: 'OWNR1234', owner_id: 'qa-user', is_owner: true, member_count: 1 };
