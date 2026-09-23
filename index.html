@@ -843,6 +843,10 @@
             const [feedback, setFeedback] = useState(null);
             const [correctCount, setCorrectCount] = useState(0);
             const [isMuted, setIsMuted] = useState(false);
+            const [gameToken, setGameToken] = useState(null);
+            const [gameReady, setGameReady] = useState(false);
+            const [gameError, setGameError] = useState('');
+            const checkInFlightRef = useRef(false);
             
             const videoRef = useRef(null);
             const canvasRef = useRef(null);
@@ -861,45 +865,68 @@
                 return <span className="text-4xl">{DEFAULT_POSE_CONFIG[poseId]?.icon || '❓'}</span>;
             };
 
-            const checkAnswer = useCallback(() => {
-                if (feedback) return;
-                const correctAns = currentQuestion.answers.find(a => a.isCorrect);
-                const isCorrect = detectedPose === (correctAns?.pose || 'NONE');
-                
-                // Kích hoạt phản hồi
-                setFeedback(isCorrect ? 'correct' : 'wrong');
-                let newCorrectCount = correctCount;
-                if (isCorrect) {
-                    newCorrectCount = correctCount + 1;
-                    setCorrectCount(newCorrectCount);
-                }
+            useEffect(() => {
+                let cancelled = false;
+                setGameReady(false);
+                setGameError('');
+                backendRequest('game.start', { data: settings })
+                    .then((result) => {
+                        if (cancelled) return;
+                        setGameToken(result.game_token);
+                        setQIndex(result.index || 0);
+                        setCorrectCount(result.score || 0);
+                        setGameReady(true);
+                    })
+                    .catch((err) => {
+                        if (!cancelled) setGameError(err.message || 'Không tạo được phiên chơi.');
+                    });
+                return () => { cancelled = true; };
+            }, []);
 
-                if (questionAudioRef.current) {
-                    questionAudioRef.current.pause();
-                    questionAudioRef.current.currentTime = 0;
-                }
-                const audioSrc = mediaSrc(isCorrect ? settings.audio.correct?.data : settings.audio.wrong?.data);
-                if (audioSrc && !isMuted) new Audio(audioSrc).play().catch(() => {});
+            const checkAnswer = useCallback(async () => {
+                if (feedback || !gameReady || !gameToken || checkInFlightRef.current) return;
+                checkInFlightRef.current = true;
+                try {
+                    const result = await backendRequest('game.check', {
+                        game_token: gameToken,
+                        detected_pose: detectedPose
+                    });
 
-                setTimeout(() => {
-                    if (!isMounted.current) return;
-                    if (qIndex < settings.questions.length - 1) {
-                        setQIndex(qIndex + 1);
-                        setTimeLeft(settings.timeLimit);
-                        setCheckTimer(settings.checkInterval || 3);
-                        setFeedback(null);
-                    } else {
-                        setScore(newCorrectCount);
-                        setScreen('RESULT');
+                    const isCorrect = result.feedback === 'correct';
+                    setFeedback(result.feedback);
+                    setCorrectCount(result.score || 0);
+
+                    if (questionAudioRef.current) {
+                        questionAudioRef.current.pause();
+                        questionAudioRef.current.currentTime = 0;
                     }
-                }, 1500);
-            }, [feedback, currentQuestion, detectedPose, correctCount, isMuted, qIndex, settings, setScore, setScreen]);
+                    const audioSrc = mediaSrc(isCorrect ? settings.audio.correct?.data : settings.audio.wrong?.data);
+                    if (audioSrc && !isMuted) new Audio(audioSrc).play().catch(() => {});
+
+                    setTimeout(() => {
+                        if (!isMounted.current) return;
+                        if (result.finished) {
+                            setScore(result.score || 0);
+                            setScreen('RESULT');
+                        } else {
+                            setGameToken(result.game_token);
+                            setQIndex(result.next_index);
+                            setTimeLeft(settings.timeLimit);
+                            setCheckTimer(settings.checkInterval || 3);
+                            setFeedback(null);
+                            checkInFlightRef.current = false;
+                        }
+                    }, 1500);
+                } catch (err) {
+                    checkInFlightRef.current = false;
+                    alert('Backend không chấm được câu hỏi: ' + err.message);
+                }
+            }, [feedback, gameReady, gameToken, detectedPose, isMuted, settings, setScore, setScreen]);
 
             // Hàm xử lý khi nhấn nút Kiểm tra
             const handleManualCheck = () => {
-                if (feedback) return;
-                setTimeLeft(0); // Đưa thời gian về 0 như thầy yêu cầu
-                // checkAnswer sẽ được gọi tự động bởi useEffect khi timeLeft === 0
+                if (feedback || !gameReady || checkInFlightRef.current) return;
+                setTimeLeft(0);
             };
 
             useEffect(() => {
@@ -970,7 +997,7 @@
             }, []);
 
             useEffect(() => {
-                if (feedback) return;
+                if (!gameReady || gameError || feedback) return;
                 if (timeLeft <= 0) { checkAnswer(); return; }
                 const timer = setInterval(() => setTimeLeft(prev => prev - 1), 1000);
                 const intervalTimer = setInterval(() => {
@@ -980,7 +1007,20 @@
                     });
                 }, 1000);
                 return () => { clearInterval(timer); clearInterval(intervalTimer); };
-            }, [timeLeft, feedback, checkTimer, checkAnswer, settings.checkInterval]);
+            }, [timeLeft, feedback, checkTimer, checkAnswer, settings.checkInterval, gameReady, gameError]);
+
+            if (!gameReady) {
+                return (
+                    <div className="w-full h-full bg-slate-950 text-white grid place-items-center p-6 text-center">
+                        <div>
+                            <div className="text-6xl mb-4">{gameError ? '⚠️' : '🎮'}</div>
+                            <div className="text-2xl font-black">{gameError ? 'Không thể bắt đầu bài chơi' : 'Đang tạo phiên chơi trên backend...'}</div>
+                            {gameError && <div className="mt-3 text-red-300 font-bold max-w-xl">{gameError}</div>}
+                            <button onClick={() => setScreen('MENU')} className="mt-6 bg-indigo-600 hover:bg-indigo-500 px-6 py-3 rounded-xl font-black">← TRANG CHỦ</button>
+                        </div>
+                    </div>
+                );
+            }
 
             return (
                 <div className="w-full h-full flex flex-col bg-slate-100 overflow-hidden">
