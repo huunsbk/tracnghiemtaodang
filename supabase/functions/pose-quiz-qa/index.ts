@@ -258,6 +258,35 @@ Deno.serve(async (req) => {
       assert(r.asset?.path && r.asset?.url, "media asset missing path/url");
     });
 
+    await step("storage_bucket_is_private", async () => {
+      const { data, error } = await admin.storage.getBucket(BUCKET);
+      if (error) throw error;
+      assert(data?.public === false, "media bucket became public");
+    });
+
+    await step("authenticated_direct_table_access_is_blocked", async () => {
+      const res = await fetch(PROJECT_URL + "/rest/v1/pose_quiz_sets?select=id&limit=1", {
+        headers: {
+          apikey: pubKey,
+          Authorization: "Bearer " + tokenA,
+        },
+      });
+      assert(res.status === 401 || res.status === 403, "authenticated browser can query business table directly");
+    });
+
+    await step("authenticated_direct_storage_upload_is_blocked", async () => {
+      const res = await fetch(PROJECT_URL + "/storage/v1/object/" + BUCKET + "/users/" + userA.id + "/qa-bypass.png", {
+        method: "POST",
+        headers: {
+          apikey: pubKey,
+          Authorization: "Bearer " + tokenA,
+          "Content-Type": "image/png",
+        },
+        body: Uint8Array.from([137,80,78,71,13,10,26,10]),
+      });
+      assert(res.status === 400 || res.status === 401 || res.status === 403, "authenticated browser can upload Storage directly");
+    });
+
     const group = await step("group_create", async () => {
       const r = await api(tokenA, "groups.create", { name: "Nhóm backend QA" });
       assert(r.group?.join_code?.length === 8, "join code invalid");
@@ -291,6 +320,42 @@ Deno.serve(async (req) => {
       assert(visibleToB.some((x: any) => x.visibility === "public" && x.user_id === userA.id), "public question hidden");
       assert(visibleToB.some((x: any) => x.visibility === "group" && x.group_id === group.id), "group question hidden");
       assert(!visibleToB.some((x: any) => x.visibility === "private" && x.user_id === userA.id), "private question leaked");
+    });
+
+    await step("bank_filters_are_backend_enforced", async () => {
+      const r = await api(tokenB, "bank.list", {
+        subject_name: "Tin học QA",
+        lesson_name: "Bài QA",
+        source: "PUBLIC",
+        search: "công khai",
+      });
+      assert((r.items || []).length >= 1, "public filter returned nothing");
+      assert((r.items || []).every((x: any) =>
+        x.subject_name === "Tin học QA" &&
+        x.lesson_name === "Bài QA" &&
+        x.visibility === "public" &&
+        String(x.question?.text || "").toLocaleLowerCase("vi").includes("công khai")
+      ), "backend bank filters returned a mismatched row");
+    });
+
+    await step("bank_resolve_checks_access", async () => {
+      const allowedIds = visibleToB
+        .filter((x: any) => x.user_id === userA.id)
+        .map((x: any) => x.id)
+        .slice(0, 2);
+      const resolved = await api(tokenB, "bank.resolve", { ids: allowedIds });
+      assert((resolved.questions || []).length === allowedIds.length, "accessible bank questions did not resolve");
+
+      const ownerRows = await api(tokenA, "bank.list", { source: "MINE" });
+      const privateRow = (ownerRows.items || []).find((x: any) => x.visibility === "private" && x.user_id === userA.id);
+      assert(privateRow?.id, "private owner row missing for access test");
+      let rejected = false;
+      try {
+        await api(tokenB, "bank.resolve", { ids: [privateRow.id] });
+      } catch {
+        rejected = true;
+      }
+      assert(rejected, "member resolved another user's private question");
     });
 
     await step("bank_non_owner_cannot_delete", async () => {
