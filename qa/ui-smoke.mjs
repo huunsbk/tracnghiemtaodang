@@ -77,7 +77,7 @@ if (APP.includes('githack.com')) {
     domain: host,
     path: '/',
     secure: true,
-    httpOnly: false,
+    httpOnly: true,
     sameSite: 'Lax'
   }]);
 }
