@@ -133,6 +133,13 @@ await page.route(SUPABASE_HOST + '/functions/v1/pose-quiz-api**', async route =>
     return route.fulfill(ok({}));
   }
   if (action === 'bank.list') return route.fulfill(ok({ items: state.bank }));
+  if (action === 'bank.resolve') {
+    const ids = new Set(body.ids || []);
+    const questions = state.bank
+      .filter(item => ids.has(item.id))
+      .map((item, idx) => ({ ...JSON.parse(JSON.stringify(item.question)), id: Date.now() + idx }));
+    return route.fulfill(ok({ questions }));
+  }
   if (action === 'bank.save') {
     for (const q of body.questions || []) {
       state.bank.unshift({
