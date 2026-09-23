@@ -282,7 +282,7 @@ await check('Question bank filters, select and multi-import work', async () => {
   await sourceSelect.selectOption('PUBLIC');
   await hasText('Câu hỏi công khai mẫu').waitFor();
   await byButton('CHỌN TẤT CẢ').click();
-  await page.getByRole('button', { name: /THÊM .* CÂU VÀO BÀI ĐANG SOẠN/ }).click();
+  await page.getByRole('button', { name: /thêm .* câu vào bài đang soạn/i }).click();
   await hasText('THIẾT LẬP BÀI DẠY').waitFor();
 });
 
