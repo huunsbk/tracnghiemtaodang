@@ -61,7 +61,8 @@
             const options = {
                 method: 'POST',
                 headers: {
-                    Authorization: `Bearer ${session.access_token}`
+                    Authorization: `Bearer ${session.access_token}`,
+                    apikey: SUPABASE_CONFIG.publishableKey
                 }
             };
 
