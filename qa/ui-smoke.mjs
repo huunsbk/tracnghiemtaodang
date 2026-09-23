@@ -298,8 +298,8 @@ await check('Group create, copy, join, delete and leave work', async () => {
   await byButton('THAM GIA').click();
   await hasText('Nhóm đã tham gia').waitFor();
 
-  await page.getByRole('button', { name: 'XÓA NHÓM', exact: true }).click();
-  await page.getByRole('button', { name: 'RỜI NHÓM', exact: true }).click();
+  await byButton('XÓA NHÓM').click();
+  await byButton('RỜI NHÓM').click();
 });
 
 await check('Cloud library new/open/delete work', async () => {
