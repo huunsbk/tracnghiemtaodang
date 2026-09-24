@@ -1,6 +1,6 @@
 import { createClient } from "npm:@supabase/supabase-js@2.116.0";
 import { createRemoteJWKSet, jwtVerify } from "npm:jose@6.1.2";
-import * as XLSX from "npm:xlsx@0.18.5";
+import ExcelJS from "npm:exceljs@4.4.0";
 
 const PROJECT_URL = Deno.env.get("SUPABASE_URL")!;
 const MAIN_API = PROJECT_URL + "/functions/v1/pose-quiz-api";
@@ -239,14 +239,14 @@ Deno.serve(async (req) => {
     });
 
     await step("excel_import_preview", async () => {
-      const sheet = XLSX.utils.aoa_to_sheet([
+      const workbook = new ExcelJS.Workbook();
+      const sheet = workbook.addWorksheet("CauHoi");
+      sheet.addRows([
         ["Câu hỏi", "A", "B", "C", "D", "Đáp án"],
         ["Mạng máy tính dùng để làm gì?", "Kết nối", "Nấu ăn", "In giấy", "Sạc pin", "A"],
         ["2 + 2?", "3", "4", "5", "6", "B"],
       ]);
-      const workbook = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(workbook, sheet, "CauHoi");
-      const bytes = XLSX.write(workbook, { type: "array", bookType: "xlsx" }) as ArrayBuffer;
+      const bytes = await workbook.xlsx.writeBuffer();
       const file = new File([bytes], "questions.xlsx", {
         type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
       });
