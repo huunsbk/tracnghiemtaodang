@@ -1,9 +1,12 @@
 import { createClient } from "npm:@supabase/supabase-js@2.116.0";
+import * as XLSX from "npm:xlsx@0.18.5";
 
 const BUCKET = "pose-quiz-media";
 const MAX_MEDIA_BYTES = 20 * 1024 * 1024;
+const MAX_IMPORT_FILE_BYTES = 8 * 1024 * 1024;
+const MAX_IMPORT_QUESTIONS = 500;
 const SIGNED_URL_TTL = 60 * 60;
-const SCHEMA_VERSION = "2026-09-23-account-v2";
+const SCHEMA_VERSION = "2026-09-24-import-theme-v1";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -311,6 +314,7 @@ function ensureSettingsShape(input: any) {
   const data = input && typeof input === "object" ? input : {};
   const poseAssets = data.poseAssets && typeof data.poseAssets === "object" ? data.poseAssets : {};
   const globalAudio = data.audio && typeof data.audio === "object" ? data.audio : {};
+  const theme = data.theme && typeof data.theme === "object" ? data.theme : {};
   const questions = Array.isArray(data.questions) && data.questions.length
     ? data.questions
     : [{
@@ -380,7 +384,267 @@ function ensureSettingsShape(input: any) {
         data: globalAudio.bgm?.data || null,
         name: globalAudio.bgm?.name || "",
       },
+      bgmVolume: Math.min(1, Math.max(0, Number(globalAudio.bgmVolume ?? 0.3))),
+      feedbackVolume: Math.min(1, Math.max(0, Number(globalAudio.feedbackVolume ?? 0.9))),
+      questionVolume: Math.min(1, Math.max(0, Number(globalAudio.questionVolume ?? 1))),
+      defaultFeedback: globalAudio.defaultFeedback !== false,
     },
+    theme: {
+      background: theme.background || null,
+      overlay: Math.min(0.95, Math.max(0.2, Number(theme.overlay ?? 0.68))),
+      fit: ["cover", "contain"].includes(theme.fit) ? theme.fit : "cover",
+    },
+  };
+}
+
+
+const IMPORT_POSES = ["RAISE_LEFT", "RAISE_RIGHT", "BOTH_UP", "CROSS_ARMS"];
+const DEFAULT_IMPORT_MAPPING: Record<string, string> = {
+  A: "RAISE_LEFT",
+  B: "RAISE_RIGHT",
+  C: "BOTH_UP",
+  D: "CROSS_ARMS",
+};
+
+function importHeader(value: unknown) {
+  return String(value ?? "")
+    .trim()
+    .toLocaleLowerCase("vi")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/đ/g, "d")
+    .replace(/[^a-z0-9]/g, "");
+}
+
+function normalizeImportMapping(input: any) {
+  const mapping: Record<string, string> = { ...DEFAULT_IMPORT_MAPPING };
+  for (const letter of ["A", "B", "C", "D"]) {
+    const candidate = String(input?.[letter] || "").trim().toUpperCase();
+    if (IMPORT_POSES.includes(candidate)) mapping[letter] = candidate;
+  }
+  const errors: string[] = [];
+  if (new Set(Object.values(mapping)).size !== 4) {
+    errors.push("Mỗi đáp án A–D phải dùng một tư thế khác nhau.");
+  }
+  return { mapping, errors };
+}
+
+function normalizeCorrectAnswer(raw: unknown, answers: string[]) {
+  let value = String(raw ?? "").trim();
+  value = value.replace(/^(?:đáp\s*án|dap\s*an|answer|correct)\s*[:\-]?\s*/i, "").trim();
+  const direct = value.toUpperCase().replace(/[^A-D1-4]/g, "");
+  if (/^[A-D]$/.test(direct)) return direct;
+  if (/^[1-4]$/.test(direct)) return String.fromCharCode(64 + Number(direct));
+  const target = importHeader(value);
+  const idx = answers.findIndex((answer) => importHeader(answer) === target && target);
+  return idx >= 0 ? String.fromCharCode(65 + idx) : "";
+}
+
+function buildImportItem(
+  row: number,
+  questionText: unknown,
+  answerValues: unknown[],
+  correctRaw: unknown,
+  mapping: Record<string, string>,
+) {
+  const question = String(questionText ?? "").trim();
+  const answers = answerValues.slice(0, 4).map((value) => String(value ?? "").trim());
+  const errors: string[] = [];
+  if (!question) errors.push("Thiếu nội dung câu hỏi.");
+  answers.forEach((answer, idx) => {
+    if (!answer) errors.push(\`Thiếu đáp án \${String.fromCharCode(65 + idx)}.\`);
+  });
+  const correctLetter = normalizeCorrectAnswer(correctRaw, answers);
+  if (!correctLetter) errors.push("Đáp án đúng phải là A, B, C, D, 1–4 hoặc đúng nội dung một đáp án.");
+
+  const normalizedQuestion = {
+    id: crypto.randomUUID(),
+    text: question || "Câu hỏi chưa có nội dung",
+    image: null,
+    audio: { data: null, name: "" },
+    answers: answers.map((text, idx) => {
+      const letter = String.fromCharCode(65 + idx);
+      return {
+        text: text || \`Đáp án \${letter}\`,
+        pose: mapping[letter] || DEFAULT_IMPORT_MAPPING[letter],
+        isCorrect: letter === correctLetter,
+        image: null,
+      };
+    }),
+  };
+
+  return {
+    row,
+    valid: errors.length === 0,
+    errors,
+    correct: correctLetter,
+    question: normalizedQuestion,
+  };
+}
+
+function detectHeaderMap(row: unknown[]) {
+  const keys = row.map(importHeader);
+  const find = (aliases: string[]) => keys.findIndex((key) => aliases.includes(key));
+  const map = {
+    question: find(["cauhoi", "question", "noidung", "noidungcauhoi"]),
+    A: find(["a", "dapana", "phuongan", "phuonga"]),
+    B: find(["b", "dapanb", "phuongb"]),
+    C: find(["c", "dapanc", "phuongc"]),
+    D: find(["d", "dapand", "phuongd"]),
+    correct: find(["dapan", "dapandung", "correct", "answer", "ketqua"]),
+  };
+  return Object.values(map).every((idx) => idx >= 0) ? map : null;
+}
+
+function parseImportRows(rowsInput: unknown[][], mapping: Record<string, string>) {
+  const rows = rowsInput
+    .map((row) => Array.isArray(row) ? row : [])
+    .filter((row) => row.some((cell) => String(cell ?? "").trim() !== ""));
+  const errors: string[] = [];
+  if (!rows.length) return { items: [], errors: ["Không có dữ liệu câu hỏi."] };
+
+  const headerMap = detectHeaderMap(rows[0]);
+  const start = headerMap ? 1 : 0;
+  const items: any[] = [];
+
+  for (let i = start; i < rows.length && items.length < MAX_IMPORT_QUESTIONS; i++) {
+    const row = rows[i];
+    let q: unknown;
+    let answers: unknown[];
+    let correct: unknown;
+    if (headerMap) {
+      q = row[headerMap.question];
+      answers = [row[headerMap.A], row[headerMap.B], row[headerMap.C], row[headerMap.D]];
+      correct = row[headerMap.correct];
+    } else {
+      const first = String(row[0] ?? "").trim();
+      const hasStt = row.length >= 7 && /^\d+$/.test(first);
+      const offset = hasStt ? 1 : 0;
+      q = row[offset];
+      answers = [row[offset + 1], row[offset + 2], row[offset + 3], row[offset + 4]];
+      correct = row[offset + 5];
+    }
+    if ([q, ...answers, correct].every((value) => String(value ?? "").trim() === "")) continue;
+    items.push(buildImportItem(i + 1, q, answers, correct, mapping));
+  }
+
+  if (rows.length - start > MAX_IMPORT_QUESTIONS) {
+    errors.push(\`Chỉ đọc tối đa \${MAX_IMPORT_QUESTIONS} câu trong một lần nhập.\`);
+  }
+  return { items, errors };
+}
+
+function parseWordLikeText(text: string, mapping: Record<string, string>) {
+  const lines = String(text || "").replace(/\r/g, "").split("\n");
+  const records: any[] = [];
+  let current: any = null;
+  let lastAnswer = "";
+  const flush = () => {
+    if (!current) return;
+    records.push(current);
+    current = null;
+    lastAnswer = "";
+  };
+
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line) {
+      if (current?.correct && Object.keys(current.answers || {}).length >= 4) flush();
+      continue;
+    }
+
+    const qMatch = line.match(/^(?:câu|cau)\s*\d+\s*[\.\):\-]?\s*(.+)$/i)
+      || line.match(/^\d+\s*[\.\)]\s*(.+)$/);
+    if (qMatch) {
+      flush();
+      current = { question: qMatch[1].trim(), answers: {}, correct: "" };
+      continue;
+    }
+
+    const answerMatch = line.match(/^([A-D])\s*[\.\):\-]\s*(.+)$/i);
+    if (answerMatch) {
+      if (!current) current = { question: "", answers: {}, correct: "" };
+      lastAnswer = answerMatch[1].toUpperCase();
+      current.answers[lastAnswer] = answerMatch[2].trim();
+      continue;
+    }
+
+    const correctMatch = line.match(/^(?:đáp\s*án|dap\s*an|answer|correct)\s*[:\-]?\s*(.+)$/i);
+    if (correctMatch) {
+      if (!current) current = { question: "", answers: {}, correct: "" };
+      current.correct = correctMatch[1].trim();
+      continue;
+    }
+
+    if (current) {
+      if (lastAnswer) current.answers[lastAnswer] = (current.answers[lastAnswer] + " " + line).trim();
+      else current.question = (current.question + " " + line).trim();
+    }
+  }
+  flush();
+
+  const items = records.slice(0, MAX_IMPORT_QUESTIONS).map((record, idx) =>
+    buildImportItem(
+      idx + 1,
+      record.question,
+      ["A", "B", "C", "D"].map((letter) => record.answers?.[letter] || ""),
+      record.correct,
+      mapping,
+    )
+  );
+  const errors: string[] = [];
+  if (!items.length) errors.push("Không nhận diện được câu hỏi. Hãy dùng mẫu Câu 1, A., B., C., D., Đáp án: B.");
+  if (records.length > MAX_IMPORT_QUESTIONS) errors.push(\`Chỉ đọc tối đa \${MAX_IMPORT_QUESTIONS} câu trong một lần nhập.\`);
+  return { items, errors };
+}
+
+function parsePastedQuestions(text: string, mapping: Record<string, string>) {
+  const clean = String(text || "").trim();
+  if (!clean) return { items: [], errors: ["Hãy dán nội dung câu hỏi trước."] };
+  if (clean.includes("\t")) {
+    const rows = clean.split(/\r?\n/).map((line) => line.split("\t"));
+    return parseImportRows(rows, mapping);
+  }
+  return parseWordLikeText(clean, mapping);
+}
+
+async function parseExcelQuestions(file: File, mapping: Record<string, string>) {
+  if (file.size > MAX_IMPORT_FILE_BYTES) {
+    throw Object.assign(new Error("File Excel vượt quá giới hạn 8 MB."), { status: 413 });
+  }
+  const ext = String(file.name || "").toLowerCase().split(".").pop();
+  if (!["xlsx", "xls"].includes(ext || "")) {
+    throw Object.assign(new Error("Chỉ hỗ trợ Excel .xlsx/.xls. Với Word, hãy sao chép nội dung rồi dùng Dán nhanh."), { status: 415 });
+  }
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  const workbook = XLSX.read(bytes, { type: "array", cellDates: false });
+  const firstSheet = workbook.SheetNames[0];
+  if (!firstSheet) throw Object.assign(new Error("File Excel không có trang tính."), { status: 400 });
+  const rows = XLSX.utils.sheet_to_json(workbook.Sheets[firstSheet], {
+    header: 1,
+    raw: false,
+    defval: "",
+    blankrows: false,
+  }) as unknown[][];
+  return parseImportRows(rows, mapping);
+}
+
+function importPreviewResponse(
+  parsed: { items: any[]; errors: string[] },
+  mappingInfo: { mapping: Record<string, string>; errors: string[] },
+  source: string,
+) {
+  const validCount = parsed.items.filter((item) => item.valid).length;
+  return {
+    ok: true,
+    source,
+    total: parsed.items.length,
+    valid_count: validCount,
+    invalid_count: parsed.items.length - validCount,
+    items: parsed.items,
+    errors: parsed.errors,
+    pose_mapping: mappingInfo.mapping,
+    mapping_errors: mappingInfo.errors,
   };
 }
 
@@ -975,6 +1239,30 @@ async function handleAction(action: string, body: any, user: any, req: Request) 
       .delete().eq("user_id", userId).in("id", ids).select("id");
     if (error) throw error;
     return { ok: true, count: data?.length || 0 };
+  }
+
+
+  if (action === "questions.import.preview") {
+    const contentType = req.headers.get("content-type") || "";
+    if (contentType.includes("multipart/form-data")) {
+      const form = await req.formData();
+      const file = form.get("file");
+      if (!(file instanceof File)) throw Object.assign(new Error("Không tìm thấy file Excel."), { status: 400 });
+      let payload: any = {};
+      const payloadText = form.get("payload");
+      if (typeof payloadText === "string" && payloadText.trim()) {
+        try { payload = JSON.parse(payloadText); } catch (_) {
+          throw Object.assign(new Error("Thiết lập import không hợp lệ."), { status: 400 });
+        }
+      }
+      const mappingInfo = normalizeImportMapping(payload.pose_mapping);
+      const parsed = await parseExcelQuestions(file, mappingInfo.mapping);
+      return importPreviewResponse(parsed, mappingInfo, "excel");
+    }
+
+    const mappingInfo = normalizeImportMapping(body.pose_mapping);
+    const parsed = parsePastedQuestions(String(body.text || ""), mappingInfo.mapping);
+    return importPreviewResponse(parsed, mappingInfo, "paste");
   }
 
   if (action === "document.import") {
