@@ -1,4 +1,5 @@
 import { createClient } from "npm:@supabase/supabase-js@2.116.0";
+import { corsHeaders as supabaseCorsHeaders } from "npm:@supabase/supabase-js@2.116.0/cors";
 import ExcelJS from "npm:exceljs@4.4.0";
 import { Buffer } from "node:buffer";
 
@@ -7,11 +8,11 @@ const MAX_MEDIA_BYTES = 20 * 1024 * 1024;
 const MAX_IMPORT_FILE_BYTES = 8 * 1024 * 1024;
 const MAX_IMPORT_QUESTIONS = 500;
 const SIGNED_URL_TTL = 60 * 60;
-const SCHEMA_VERSION = "2026-09-24-import-theme-secure-excel-v1";
+const SCHEMA_VERSION = "2026-09-24-cors-media-upload-v1";
 
 const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+  ...supabaseCorsHeaders,
+  "Access-Control-Allow-Headers": `${supabaseCorsHeaders["Access-Control-Allow-Headers"]}, x-pose-action`,
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
 
