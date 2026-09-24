@@ -190,6 +190,24 @@ Deno.serve(async (req) => {
     const tokenA = await step("sign_in_user_a", () => signIn(emailA, password));
     const tokenB = await step("sign_in_user_b", () => signIn(emailB, password));
 
+    await step("cors_preflight_allows_pose_action", async () => {
+      const res = await fetch(MAIN_API + "?action=media.upload", {
+        method: "OPTIONS",
+        headers: {
+          Origin: "https://giaovien-psi.vercel.app",
+          "Access-Control-Request-Method": "POST",
+          "Access-Control-Request-Headers": "authorization, apikey, x-pose-action",
+        },
+      });
+      assert(res.ok, "CORS preflight did not return 2xx");
+      const allowHeaders = String(res.headers.get("access-control-allow-headers") || "").toLowerCase();
+      const allowMethods = String(res.headers.get("access-control-allow-methods") || "").toUpperCase();
+      assert(allowHeaders.includes("x-pose-action"), "CORS does not allow x-pose-action");
+      assert(allowHeaders.includes("authorization"), "CORS does not allow authorization");
+      assert(allowHeaders.includes("apikey"), "CORS does not allow apikey");
+      assert(allowMethods.includes("POST"), "CORS does not allow POST");
+    });
+
     await step("backend_bootstrap", async () => {
       const r = await api(tokenA, "bootstrap");
       assert(r.ok === true, "bootstrap failed");
@@ -425,6 +443,18 @@ Deno.serve(async (req) => {
       const file = new File([Uint8Array.from([137,80,78,71,13,10,26,10])], "qa.png", { type: "image/png" });
       const r = await apiFile(tokenA, "media.upload", file);
       assert(r.asset?.path && r.asset?.url, "media asset missing path/url");
+    });
+
+    await step("direct_audio_upload", async () => {
+      const wavHeader = Uint8Array.from([
+        82,73,70,70,36,0,0,0,87,65,86,69,102,109,116,32,
+        16,0,0,0,1,0,1,0,68,172,0,0,136,88,1,0,2,0,16,0,
+        100,97,116,97,0,0,0,0
+      ]);
+      const file = new File([wavHeader], "qa-audio.wav", { type: "audio/wav" });
+      const r = await apiFile(tokenA, "media.upload", file);
+      assert(r.asset?.path && r.asset?.url, "audio asset missing path/url");
+      assert(String(r.asset?.mime || "").startsWith("audio/"), "audio mime not preserved");
     });
 
     await step("storage_bucket_is_private", async () => {
