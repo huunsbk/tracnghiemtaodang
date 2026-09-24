@@ -415,7 +415,7 @@ Deno.serve(async (req) => {
       const started = await api(tokenA, "game.start", { data: lessonData });
       const original = String(started.game_token);
       const last = original.slice(-1);
-      const tampered = original.slice(0, -1) + (last === "A" ? "B" : "A");
+      const tampered = original.slice(0, -1) + (last === "A" ? "Q" : "A");
       let rejected = false;
       try {
         await api(tokenA, "game.check", {
