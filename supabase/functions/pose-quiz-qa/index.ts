@@ -1,5 +1,6 @@
 import { createClient } from "npm:@supabase/supabase-js@2.116.0";
 import { createRemoteJWKSet, jwtVerify } from "npm:jose@6.1.2";
+import * as XLSX from "npm:xlsx@0.18.5";
 
 const PROJECT_URL = Deno.env.get("SUPABASE_URL")!;
 const MAIN_API = PROJECT_URL + "/functions/v1/pose-quiz-api";
@@ -118,9 +119,10 @@ async function qaRecoveryState(uid: string, purpose: string) {
   return payload + "." + qaB64(sig);
 }
 
-async function apiFile(token: string, action: string, file: File) {
+async function apiFile(token: string, action: string, file: File, payload: any = {}) {
   const form = new FormData();
   form.append("file", file);
+  if (payload && Object.keys(payload).length) form.append("payload", JSON.stringify(payload));
   const res = await fetch(MAIN_API + "?action=" + encodeURIComponent(action), {
     method: "POST",
     headers: {
@@ -192,6 +194,73 @@ Deno.serve(async (req) => {
     await step("backend_bootstrap", async () => {
       const r = await api(tokenA, "bootstrap");
       assert(r.ok === true, "bootstrap failed");
+    });
+
+
+    await step("smart_paste_import_preview", async () => {
+      const text = [
+        "Câu 1. Thiết bị nào dùng để nhập văn bản?",
+        "A. Chuột",
+        "B. Bàn phím",
+        "C. Loa",
+        "D. Máy in",
+        "Đáp án: B",
+        "",
+        "Câu 2. 2 + 3 bằng bao nhiêu?",
+        "A. 4",
+        "B. 5",
+        "C. 6",
+        "D. 7",
+        "Đáp án: B",
+      ].join("\n");
+      const r = await api(tokenA, "questions.import.preview", {
+        text,
+        pose_mapping: {
+          A: "RAISE_LEFT",
+          B: "RAISE_RIGHT",
+          C: "BOTH_UP",
+          D: "CROSS_ARMS",
+        },
+      });
+      assert(r.total === 2 && r.valid_count === 2 && r.invalid_count === 0, "smart paste counts wrong");
+      assert(r.items?.[0]?.question?.answers?.[1]?.isCorrect === true, "smart paste correct answer wrong");
+      assert(r.items?.[0]?.question?.answers?.[1]?.pose === "RAISE_RIGHT", "smart paste pose mapping wrong");
+    });
+
+    await step("tabular_paste_import_preview_and_error", async () => {
+      const text = [
+        "Câu hỏi\tA\tB\tC\tD\tĐáp án",
+        "Thiết bị xuất?\tMàn hình\tBàn phím\tChuột\tMicro\tA",
+        "Câu lỗi\t1\t2\t3\t4\tE",
+      ].join("\n");
+      const r = await api(tokenA, "questions.import.preview", { text });
+      assert(r.total === 2 && r.valid_count === 1 && r.invalid_count === 1, "tabular preview validation counts wrong");
+      assert((r.items?.[1]?.errors || []).length > 0, "invalid row has no error");
+    });
+
+    await step("excel_import_preview", async () => {
+      const sheet = XLSX.utils.aoa_to_sheet([
+        ["Câu hỏi", "A", "B", "C", "D", "Đáp án"],
+        ["Mạng máy tính dùng để làm gì?", "Kết nối", "Nấu ăn", "In giấy", "Sạc pin", "A"],
+        ["2 + 2?", "3", "4", "5", "6", "B"],
+      ]);
+      const workbook = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(workbook, sheet, "CauHoi");
+      const bytes = XLSX.write(workbook, { type: "array", bookType: "xlsx" }) as ArrayBuffer;
+      const file = new File([bytes], "questions.xlsx", {
+        type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      });
+      const r = await apiFile(tokenA, "questions.import.preview", file, {
+        pose_mapping: {
+          A: "RAISE_LEFT",
+          B: "RAISE_RIGHT",
+          C: "BOTH_UP",
+          D: "CROSS_ARMS",
+        },
+      });
+      assert(r.source === "excel", "excel source not reported");
+      assert(r.total === 2 && r.valid_count === 2, "excel preview counts wrong");
+      assert(r.items?.[1]?.question?.answers?.[1]?.isCorrect === true, "excel correct answer wrong");
     });
 
     await step("account_profile_get", async () => {
@@ -279,7 +348,16 @@ Deno.serve(async (req) => {
       audio: {
         correct: { data: wav, name: "correct.wav" },
         wrong: { data: wav, name: "wrong.wav" },
-        bgm: { data: wav, name: "bgm.wav" }
+        bgm: { data: wav, name: "bgm.wav" },
+        bgmVolume: 0.25,
+        feedbackVolume: 0.8,
+        questionVolume: 0.9,
+        defaultFeedback: true
+      },
+      theme: {
+        background: png,
+        overlay: 0.62,
+        fit: "cover"
       }
     };
 
@@ -294,6 +372,10 @@ Deno.serve(async (req) => {
       assert(r.item.data?.questions?.[0]?.image?.url, "question image signed URL missing");
       assert(r.item.data?.questions?.[0]?.audio?.data?.path, "question audio not migrated");
       assert(r.item.data?.audio?.bgm?.data?.path, "BGM not migrated");
+      assert(r.item.data?.audio?.bgmVolume === 0.25, "BGM volume not preserved");
+      assert(r.item.data?.audio?.feedbackVolume === 0.8, "feedback volume not preserved");
+      assert(r.item.data?.theme?.background?.path, "lesson background not migrated");
+      assert(r.item.data?.theme?.overlay === 0.62, "background overlay not preserved");
       return r.item;
     });
 
