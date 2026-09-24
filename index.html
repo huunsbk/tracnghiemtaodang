@@ -90,7 +90,6 @@
                 const form = new FormData();
                 form.append('file', file);
                 options.body = form;
-                options.headers['x-pose-action'] = action;
             } else {
                 options.headers['Content-Type'] = 'application/json';
                 options.body = JSON.stringify({ action, ...payload });
