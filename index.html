@@ -3,9 +3,12 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="referrer" content="no-referrer">
     <title>AI Pose Quiz Game - V9.9 Quick Response</title>
     <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <script src="./supabase-config.js"></script>
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js"></script>
@@ -31,7 +34,79 @@
     <script type="text/babel">
         const { useState, useEffect, useRef, useMemo, useCallback } = React;
 
-        const STORAGE_KEY = 'pose_game_data_v9_9_stable';
+        const SUPABASE_CONFIG = window.POSE_QUIZ_SUPABASE;
+        const supabaseClient = window.supabase.createClient(
+            SUPABASE_CONFIG.url,
+            SUPABASE_CONFIG.publishableKey,
+            {
+                auth: {
+                    persistSession: true,
+                    autoRefreshToken: true,
+                    detectSessionInUrl: true
+                }
+            }
+        );
+
+        const API_URL = SUPABASE_CONFIG.url + '/functions/v1/pose-quiz-api';
+        const RECOVERY_URL = SUPABASE_CONFIG.url + '/functions/v1/pose-quiz-recovery';
+
+        const recoveryRequest = async (action, payload = {}) => {
+            const response = await fetch(RECOVERY_URL, {
+                method: 'POST',
+                headers: {
+                    apikey: SUPABASE_CONFIG.publishableKey,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ action, ...payload })
+            });
+            let result;
+            try { result = await response.json(); }
+            catch { throw new Error('Dịch vụ khôi phục trả dữ liệu không hợp lệ.'); }
+            if (!response.ok || result?.ok === false) {
+                throw new Error(result?.error?.message || `Lỗi khôi phục (${response.status})`);
+            }
+            return result;
+        };
+
+        const mediaSrc = (value) => {
+            if (!value) return null;
+            if (typeof value === 'string') return value;
+            return value.url || value.signedUrl || null;
+        };
+
+        const backendRequest = async (action, payload = {}, file = null) => {
+            const { data: { session } } = await supabaseClient.auth.getSession();
+            if (!session?.access_token) throw new Error('Phiên đăng nhập đã hết hạn.');
+
+            const options = {
+                method: 'POST',
+                headers: {
+                    Authorization: `Bearer ${session.access_token}`,
+                    apikey: SUPABASE_CONFIG.publishableKey
+                }
+            };
+
+            if (file) {
+                const form = new FormData();
+                form.append('file', file);
+                options.body = form;
+            } else {
+                options.headers['Content-Type'] = 'application/json';
+                options.body = JSON.stringify({ action, ...payload });
+            }
+
+            const response = await fetch(API_URL + '?action=' + encodeURIComponent(action), options);
+            let result;
+            try {
+                result = await response.json();
+            } catch {
+                throw new Error('Backend trả về dữ liệu không hợp lệ.');
+            }
+            if (!response.ok || result?.ok === false) {
+                throw new Error(result?.error?.message || `Lỗi backend (${response.status})`);
+            }
+            return result;
+        };
 
         const DEFAULT_POSE_CONFIG = {
             NONE: { label: 'Bình thường', icon: '🧍' },
@@ -64,17 +139,866 @@
             return 'NONE';
         };
 
+
+        const AuthScreen = () => {
+            const [mode, setMode] = useState('login');
+            const [email, setEmail] = useState('');
+            const [password, setPassword] = useState('');
+            const [busy, setBusy] = useState(false);
+            const [message, setMessage] = useState('');
+            const [recoveryChannel, setRecoveryChannel] = useState('email');
+            const [smsAvailable, setSmsAvailable] = useState(null);
+            const [phone, setPhone] = useState('');
+            const [otp, setOtp] = useState('');
+            const [recoveryStep, setRecoveryStep] = useState('request');
+            const [phoneRecoveryToken, setPhoneRecoveryToken] = useState('');
+            const [newPassword, setNewPassword] = useState('');
+            const [confirmPassword, setConfirmPassword] = useState('');
+
+            useEffect(() => {
+                recoveryRequest('capabilities')
+                    .then((r) => setSmsAvailable(!!r.sms))
+                    .catch(() => setSmsAvailable(false));
+            }, []);
+
+            const submit = async (e) => {
+                e.preventDefault();
+                setBusy(true);
+                setMessage('');
+                try {
+                    if (mode === 'login') {
+                        const { error } = await supabaseClient.auth.signInWithPassword({ email, password });
+                        if (error) throw error;
+                    } else {
+                        const { data, error } = await supabaseClient.auth.signUp({
+                            email,
+                            password,
+                            options: { emailRedirectTo: window.location.href.split(/[?#]/)[0] }
+                        });
+                        if (error) throw error;
+                        if (!data.session) {
+                            setMessage('Đã gửi email xác nhận. Hãy mở email để hoàn tất đăng ký rồi đăng nhập.');
+                        }
+                    }
+                } catch (err) {
+                    setMessage(err?.message || 'Không thể xác thực tài khoản.');
+                } finally {
+                    setBusy(false);
+                }
+            };
+
+            const beginRecovery = async (e) => {
+                e?.preventDefault?.();
+                setBusy(true);
+                setMessage('');
+                try {
+                    if (recoveryChannel === 'email') {
+                        await recoveryRequest('email.begin', {
+                            email,
+                            redirect_to: window.location.href.split(/[?#]/)[0]
+                        });
+                        setMessage('Nếu email đã đăng ký, hệ thống đã gửi liên kết tạo lại mật khẩu. Hãy kiểm tra Hộp thư đến và Thư rác.');
+                    } else {
+                        const result = await recoveryRequest('phone.begin', { phone });
+                        setPhone(result.phone || phone);
+                        setRecoveryStep('otp');
+                        setMessage('Nếu số điện thoại đã đăng ký, mã OTP đã được gửi.');
+                    }
+                } catch (err) {
+                    setMessage(err.message || 'Không thể gửi yêu cầu khôi phục.');
+                } finally {
+                    setBusy(false);
+                }
+            };
+
+            const verifyPhoneOtp = async () => {
+                setBusy(true);
+                setMessage('');
+                try {
+                    const result = await recoveryRequest('phone.verify', { phone, token: otp });
+                    setPhoneRecoveryToken(result.recovery_token);
+                    setRecoveryStep('reset');
+                } catch (err) {
+                    setMessage(err.message || 'Không xác minh được OTP.');
+                } finally {
+                    setBusy(false);
+                }
+            };
+
+            const completePhoneRecovery = async () => {
+                if (newPassword.length < 8) return setMessage('Mật khẩu mới cần ít nhất 8 ký tự.');
+                if (newPassword !== confirmPassword) return setMessage('Hai mật khẩu mới chưa khớp.');
+                setBusy(true);
+                setMessage('');
+                try {
+                    await recoveryRequest('phone.complete', {
+                        recovery_token: phoneRecoveryToken,
+                        new_password: newPassword
+                    });
+                    setMode('login');
+                    setRecoveryStep('request');
+                    setPhoneRecoveryToken('');
+                    setOtp('');
+                    setNewPassword('');
+                    setConfirmPassword('');
+                    setMessage('Đã tạo mật khẩu mới. Hãy đăng nhập bằng mật khẩu mới.');
+                } catch (err) {
+                    setMessage(err.message || 'Không tạo được mật khẩu mới.');
+                } finally {
+                    setBusy(false);
+                }
+            };
+
+            const switchMode = (next) => {
+                setMode(next);
+                setMessage('');
+                setRecoveryStep('request');
+                setOtp('');
+                setPhoneRecoveryToken('');
+                setNewPassword('');
+                setConfirmPassword('');
+            };
+
+            return (
+                <div className="w-screen h-screen bg-gradient-to-br from-indigo-700 via-purple-700 to-slate-900 flex items-center justify-center p-4 overflow-y-auto">
+                    <div className="w-full max-w-md bg-white rounded-[2rem] shadow-2xl p-8 my-4">
+                        <div className="text-center mb-6">
+                            <div className="text-6xl mb-3">🙋‍♂️</div>
+                            <h1 className="text-3xl font-black text-indigo-700 uppercase tracking-tight">AI Pose Quiz</h1>
+                            <p className="text-slate-500 font-semibold mt-1">
+                                {mode === 'forgot' ? 'Khôi phục tài khoản an toàn' : 'Đăng nhập để đồng bộ bài dạy và câu hỏi'}
+                            </p>
+                        </div>
+
+                        {mode !== 'forgot' ? (
+                            <>
+                                <div className="grid grid-cols-2 gap-2 bg-slate-100 p-1 rounded-xl mb-5">
+                                    <button type="button" onClick={() => switchMode('login')} className={`py-2 rounded-lg font-black text-sm ${mode === 'login' ? 'bg-white text-indigo-700 shadow' : 'text-slate-500'}`}>ĐĂNG NHẬP</button>
+                                    <button type="button" onClick={() => switchMode('register')} className={`py-2 rounded-lg font-black text-sm ${mode === 'register' ? 'bg-white text-indigo-700 shadow' : 'text-slate-500'}`}>ĐĂNG KÝ</button>
+                                </div>
+                                <form onSubmit={submit} className="space-y-4">
+                                    <div>
+                                        <label className="text-xs font-black text-slate-500 uppercase">Email</label>
+                                        <input type="email" required value={email} onChange={(e) => setEmail(e.target.value)} className="mt-1 w-full px-4 py-3 rounded-xl border-2 border-slate-200 outline-none focus:border-indigo-400 font-semibold" placeholder="giaovien@truong.edu.vn" />
+                                    </div>
+                                    <div>
+                                        <label className="text-xs font-black text-slate-500 uppercase">Mật khẩu</label>
+                                        <input type="password" required minLength="8" value={password} onChange={(e) => setPassword(e.target.value)} className="mt-1 w-full px-4 py-3 rounded-xl border-2 border-slate-200 outline-none focus:border-indigo-400 font-semibold" placeholder="Tối thiểu 8 ký tự" />
+                                    </div>
+                                    {message && <div className="text-sm font-bold text-center text-amber-700 bg-amber-50 border border-amber-200 rounded-xl p-3">{message}</div>}
+                                    <button disabled={busy} className="w-full bg-indigo-600 hover:bg-indigo-500 disabled:opacity-60 text-white py-3.5 rounded-xl font-black text-lg shadow-lg">
+                                        {busy ? 'ĐANG XỬ LÝ...' : mode === 'login' ? 'ĐĂNG NHẬP' : 'TẠO TÀI KHOẢN'}
+                                    </button>
+                                </form>
+                                {mode === 'login' && (
+                                    <button type="button" onClick={() => switchMode('forgot')} className="w-full mt-4 text-indigo-600 font-black text-sm hover:underline">QUÊN MẬT KHẨU?</button>
+                                )}
+                            </>
+                        ) : (
+                            <div className="space-y-4">
+                                <div className="grid grid-cols-2 gap-2 bg-slate-100 p-1 rounded-xl">
+                                    <button type="button" onClick={() => { setRecoveryChannel('email'); setRecoveryStep('request'); setMessage(''); }} className={`py-2.5 rounded-lg font-black text-sm ${recoveryChannel === 'email' ? 'bg-white text-indigo-700 shadow' : 'text-slate-500'}`}>✉️ EMAIL</button>
+                                    <button type="button" disabled={smsAvailable === false} onClick={() => { setRecoveryChannel('phone'); setRecoveryStep('request'); setMessage(''); }} className={`py-2.5 rounded-lg font-black text-sm disabled:opacity-40 ${recoveryChannel === 'phone' ? 'bg-white text-indigo-700 shadow' : 'text-slate-500'}`}>📱 SMS</button>
+                                </div>
+
+                                {recoveryChannel === 'email' && (
+                                    <form onSubmit={beginRecovery} className="space-y-4">
+                                        <div>
+                                            <label className="text-xs font-black text-slate-500 uppercase">Email đã đăng ký</label>
+                                            <input type="email" required value={email} onChange={(e) => setEmail(e.target.value)} className="mt-1 w-full px-4 py-3 rounded-xl border-2 border-slate-200 outline-none focus:border-indigo-400 font-semibold" placeholder="giaovien@truong.edu.vn" />
+                                        </div>
+                                        <button disabled={busy} className="w-full bg-indigo-600 text-white py-3 rounded-xl font-black disabled:opacity-60">{busy ? 'ĐANG GỬI...' : 'GỬI LIÊN KẾT KHÔI PHỤC'}</button>
+                                    </form>
+                                )}
+
+                                {recoveryChannel === 'phone' && recoveryStep === 'request' && (
+                                    <div className="space-y-4">
+                                        <div>
+                                            <label className="text-xs font-black text-slate-500 uppercase">Số điện thoại đã đăng ký</label>
+                                            <input value={phone} onChange={(e) => setPhone(e.target.value)} className="mt-1 w-full px-4 py-3 rounded-xl border-2 border-slate-200 outline-none focus:border-indigo-400 font-semibold" placeholder="0912345678 hoặc +84912345678" />
+                                        </div>
+                                        {smsAvailable === false && <div className="text-xs font-bold text-red-600 bg-red-50 p-3 rounded-xl">Hệ thống hiện chưa cấu hình nhà cung cấp SMS. Kênh email vẫn sử dụng bình thường.</div>}
+                                        <button disabled={busy || smsAvailable === false} onClick={beginRecovery} className="w-full bg-indigo-600 text-white py-3 rounded-xl font-black disabled:opacity-40">{busy ? 'ĐANG GỬI...' : 'GỬI MÃ OTP'}</button>
+                                    </div>
+                                )}
+
+                                {recoveryChannel === 'phone' && recoveryStep === 'otp' && (
+                                    <div className="space-y-4">
+                                        <div className="text-sm font-bold text-slate-600">Nhập mã OTP gửi tới <b>{phone}</b></div>
+                                        <input inputMode="numeric" maxLength="10" value={otp} onChange={(e) => setOtp(e.target.value.replace(/\D/g,''))} className="w-full px-4 py-3 text-center tracking-[0.35em] text-xl rounded-xl border-2 border-slate-200 font-black" placeholder="000000" />
+                                        <button disabled={busy || otp.length < 6} onClick={verifyPhoneOtp} className="w-full bg-indigo-600 text-white py-3 rounded-xl font-black disabled:opacity-40">XÁC MINH OTP</button>
+                                    </div>
+                                )}
+
+                                {recoveryChannel === 'phone' && recoveryStep === 'reset' && (
+                                    <div className="space-y-4">
+                                        <input type="password" minLength="8" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} className="w-full px-4 py-3 rounded-xl border-2 border-slate-200 font-semibold" placeholder="Mật khẩu mới (ít nhất 8 ký tự)" />
+                                        <input type="password" minLength="8" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} className="w-full px-4 py-3 rounded-xl border-2 border-slate-200 font-semibold" placeholder="Nhập lại mật khẩu mới" />
+                                        <button disabled={busy} onClick={completePhoneRecovery} className="w-full bg-emerald-600 text-white py-3 rounded-xl font-black disabled:opacity-40">TẠO MẬT KHẨU MỚI</button>
+                                    </div>
+                                )}
+
+                                {message && <div className="text-sm font-bold text-center text-amber-700 bg-amber-50 border border-amber-200 rounded-xl p-3">{message}</div>}
+                                <button type="button" onClick={() => switchMode('login')} className="w-full text-slate-500 font-black text-sm">← QUAY LẠI ĐĂNG NHẬP</button>
+                            </div>
+                        )}
+                        <p className="text-[11px] text-slate-400 text-center mt-5">Mỗi tài khoản chỉ xem và sửa dữ liệu của chính mình.</p>
+                    </div>
+                </div>
+            );
+        };
+
+        const EmailRecoveryReset = ({ recoveryState, onDone }) => {
+            const [password, setPassword] = useState('');
+            const [confirmPassword, setConfirmPassword] = useState('');
+            const [busy, setBusy] = useState(false);
+            const [message, setMessage] = useState('');
+
+            const submit = async (e) => {
+                e.preventDefault();
+                if (password.length < 8) return setMessage('Mật khẩu mới cần ít nhất 8 ký tự.');
+                if (password !== confirmPassword) return setMessage('Hai mật khẩu chưa khớp.');
+                setBusy(true);
+                setMessage('');
+                try {
+                    await recoveryRequest('email.complete', { recovery_state: recoveryState, new_password: password });
+                    try { await supabaseClient.auth.signOut({ scope: 'local' }); } catch (_) {}
+                    onDone();
+                } catch (err) {
+                    setMessage(err.message || 'Không tạo được mật khẩu mới.');
+                } finally {
+                    setBusy(false);
+                }
+            };
+
+            return (
+                <div className="w-screen h-screen bg-gradient-to-br from-emerald-600 via-indigo-700 to-slate-900 grid place-items-center p-4">
+                    <form onSubmit={submit} className="w-full max-w-md bg-white rounded-[2rem] shadow-2xl p-8 space-y-4">
+                        <div className="text-5xl text-center">🔐</div>
+                        <h2 className="text-2xl font-black text-slate-800 text-center">TẠO LẠI MẬT KHẨU</h2>
+                        <p className="text-sm text-slate-500 font-semibold text-center">Liên kết khôi phục đã được backend xác thực.</p>
+                        <input type="password" required minLength="8" value={password} onChange={(e) => setPassword(e.target.value)} className="w-full px-4 py-3 rounded-xl border-2 border-slate-200 font-semibold" placeholder="Mật khẩu mới (ít nhất 8 ký tự)" />
+                        <input type="password" required minLength="8" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} className="w-full px-4 py-3 rounded-xl border-2 border-slate-200 font-semibold" placeholder="Nhập lại mật khẩu mới" />
+                        {message && <div className="text-sm font-bold text-red-600 bg-red-50 rounded-xl p-3 text-center">{message}</div>}
+                        <button disabled={busy} className="w-full bg-emerald-600 text-white py-3.5 rounded-xl font-black disabled:opacity-50">{busy ? 'ĐANG LƯU...' : 'LƯU MẬT KHẨU MỚI'}</button>
+                    </form>
+                </div>
+            );
+        };
+
+        const AccountPage = ({ setScreen }) => {
+            const [profile, setProfile] = useState(null);
+            const [displayName, setDisplayName] = useState('');
+            const [schoolName, setSchoolName] = useState('');
+            const [phone, setPhone] = useState('');
+            const [phoneOtp, setPhoneOtp] = useState('');
+            const [phoneStep, setPhoneStep] = useState('idle');
+            const [currentPassword, setCurrentPassword] = useState('');
+            const [newPassword, setNewPassword] = useState('');
+            const [confirmPassword, setConfirmPassword] = useState('');
+            const [busy, setBusy] = useState('');
+            const [message, setMessage] = useState('');
+
+            const applyProfile = (p) => {
+                setProfile(p);
+                setDisplayName(p?.display_name || '');
+                setSchoolName(p?.school_name || '');
+                setPhone(p?.phone || '');
+            };
+
+            const load = async () => {
+                setBusy('load');
+                try {
+                    const result = await backendRequest('account.profile.get');
+                    applyProfile(result.profile);
+                } catch (err) {
+                    setMessage(err.message);
+                } finally { setBusy(''); }
+            };
+
+            useEffect(() => { load(); }, []);
+
+            const saveProfile = async () => {
+                setBusy('profile'); setMessage('');
+                try {
+                    const result = await backendRequest('account.profile.update', { display_name: displayName, school_name: schoolName });
+                    applyProfile(result.profile);
+                    setMessage('Đã cập nhật hồ sơ.');
+                } catch (err) { setMessage(err.message); }
+                finally { setBusy(''); }
+            };
+
+            const uploadAvatar = async (file) => {
+                if (!file) return;
+                setBusy('avatar'); setMessage('');
+                try {
+                    const result = await backendRequest('account.avatar.upload', {}, file);
+                    applyProfile(result.profile);
+                    setMessage('Đã cập nhật ảnh đại diện.');
+                } catch (err) { setMessage(err.message); }
+                finally { setBusy(''); }
+            };
+
+            const deleteAvatar = async () => {
+                setBusy('avatar'); setMessage('');
+                try {
+                    const result = await backendRequest('account.avatar.delete');
+                    applyProfile(result.profile);
+                    setMessage('Đã xóa ảnh đại diện.');
+                } catch (err) { setMessage(err.message); }
+                finally { setBusy(''); }
+            };
+
+            const beginPhone = async () => {
+                setBusy('phone'); setMessage('');
+                try {
+                    const result = await backendRequest('account.phone.begin', { phone });
+                    setPhone(result.phone || phone);
+                    setPhoneStep('otp');
+                    setMessage('Đã gửi OTP đến số điện thoại mới.');
+                } catch (err) { setMessage(err.message); }
+                finally { setBusy(''); }
+            };
+
+            const verifyPhone = async () => {
+                setBusy('phone'); setMessage('');
+                try {
+                    const result = await backendRequest('account.phone.verify', { phone, token: phoneOtp });
+                    applyProfile(result.profile);
+                    setPhoneStep('idle');
+                    setPhoneOtp('');
+                    setMessage('Đã xác minh và cập nhật số điện thoại.');
+                } catch (err) { setMessage(err.message); }
+                finally { setBusy(''); }
+            };
+
+            const changePassword = async () => {
+                if (newPassword.length < 8) return setMessage('Mật khẩu mới cần ít nhất 8 ký tự.');
+                if (newPassword !== confirmPassword) return setMessage('Hai mật khẩu mới chưa khớp.');
+                setBusy('password'); setMessage('');
+                try {
+                    await backendRequest('account.password.change', { current_password: currentPassword, new_password: newPassword });
+                    alert('Đổi mật khẩu thành công. Hãy đăng nhập lại bằng mật khẩu mới.');
+                    await supabaseClient.auth.signOut({ scope: 'local' });
+                } catch (err) { setMessage(err.message); }
+                finally { setBusy(''); }
+            };
+
+            if (!profile && busy === 'load') return <div className="w-full h-full grid place-items-center bg-slate-50 font-black text-slate-500">Đang tải hồ sơ...</div>;
+
+            return (
+                <div className="w-full h-full bg-slate-50 flex flex-col text-slate-800">
+                    <div className="bg-slate-900 text-white px-6 py-4 flex items-center justify-between">
+                        <div>
+                            <h2 className="text-2xl font-black">👤 TÀI KHOẢN CỦA TÔI</h2>
+                            <p className="text-slate-400 text-sm font-semibold">Thông tin cá nhân và bảo mật tài khoản</p>
+                        </div>
+                        <button onClick={() => setScreen('MENU')} className="bg-white/10 px-4 py-2 rounded-xl font-black">← TRANG CHỦ</button>
+                    </div>
+                    <div className="flex-1 overflow-y-auto p-5">
+                        <div className="max-w-4xl mx-auto grid lg:grid-cols-2 gap-5">
+                            <section className="bg-white rounded-3xl border border-slate-200 p-6 shadow-sm space-y-5">
+                                <h3 className="text-lg font-black text-indigo-700">Hồ sơ</h3>
+                                <div className="flex items-center gap-5">
+                                    <div className="w-24 h-24 rounded-full bg-indigo-50 border-4 border-white shadow overflow-hidden grid place-items-center text-4xl">
+                                        {profile?.avatar_url ? <img src={profile.avatar_url} className="w-full h-full object-cover" /> : '👤'}
+                                    </div>
+                                    <div className="flex-1 space-y-2">
+                                        <label className="block relative bg-indigo-600 text-white text-center px-4 py-2.5 rounded-xl font-black cursor-pointer overflow-hidden">
+                                            {busy === 'avatar' ? 'ĐANG TẢI...' : 'THAY ẢNH ĐẠI DIỆN'}
+                                            <input type="file" accept="image/*" className="absolute inset-0 opacity-0 cursor-pointer" onChange={(e) => uploadAvatar(e.target.files?.[0])} />
+                                        </label>
+                                        {profile?.avatar_url && <button onClick={deleteAvatar} className="w-full text-xs font-black text-red-600">XÓA ẢNH</button>}
+                                    </div>
+                                </div>
+                                <div><label className="text-xs font-black text-slate-500 uppercase">Email</label><input disabled value={profile?.email || ''} className="mt-1 w-full px-4 py-3 rounded-xl bg-slate-100 text-slate-500 font-semibold" /></div>
+                                <div><label className="text-xs font-black text-slate-500 uppercase">Tên hiển thị / đại diện</label><input value={displayName} onChange={(e) => setDisplayName(e.target.value)} className="mt-1 w-full px-4 py-3 rounded-xl border-2 border-slate-200 font-semibold" placeholder="Nguyễn Văn A" /></div>
+                                <div><label className="text-xs font-black text-slate-500 uppercase">Trường công tác</label><input value={schoolName} onChange={(e) => setSchoolName(e.target.value)} className="mt-1 w-full px-4 py-3 rounded-xl border-2 border-slate-200 font-semibold" placeholder="Tên trường..." /></div>
+                                <button disabled={busy === 'profile'} onClick={saveProfile} className="w-full bg-indigo-600 text-white py-3 rounded-xl font-black disabled:opacity-50">LƯU HỒ SƠ</button>
+                            </section>
+
+                            <div className="space-y-5">
+                                <section className="bg-white rounded-3xl border border-slate-200 p-6 shadow-sm space-y-4">
+                                    <h3 className="text-lg font-black text-emerald-700">Số điện thoại</h3>
+                                    <div className="text-xs font-bold text-slate-500">Trạng thái: {profile?.phone_confirmed ? '✅ Đã xác minh' : '⚠️ Chưa xác minh'}</div>
+                                    <input value={phone} onChange={(e) => { setPhone(e.target.value); setPhoneStep('idle'); }} className="w-full px-4 py-3 rounded-xl border-2 border-slate-200 font-semibold" placeholder="0912345678 hoặc +84912345678" />
+                                    {phoneStep === 'otp' ? (
+                                        <div className="flex gap-2">
+                                            <input inputMode="numeric" value={phoneOtp} onChange={(e) => setPhoneOtp(e.target.value.replace(/\D/g,''))} className="flex-1 px-4 py-3 rounded-xl border-2 border-emerald-200 font-black tracking-[0.25em] text-center" placeholder="OTP" />
+                                            <button disabled={busy === 'phone'} onClick={verifyPhone} className="bg-emerald-600 text-white px-4 rounded-xl font-black">XÁC MINH</button>
+                                        </div>
+                                    ) : (
+                                        <button disabled={busy === 'phone'} onClick={beginPhone} className="w-full bg-emerald-600 text-white py-3 rounded-xl font-black disabled:opacity-50">GỬI OTP XÁC MINH SỐ MỚI</button>
+                                    )}
+                                </section>
+
+                                <section className="bg-white rounded-3xl border border-slate-200 p-6 shadow-sm space-y-4">
+                                    <h3 className="text-lg font-black text-rose-700">Đổi mật khẩu</h3>
+                                    <input type="password" value={currentPassword} onChange={(e) => setCurrentPassword(e.target.value)} className="w-full px-4 py-3 rounded-xl border-2 border-slate-200 font-semibold" placeholder="Mật khẩu hiện tại" />
+                                    <input type="password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} className="w-full px-4 py-3 rounded-xl border-2 border-slate-200 font-semibold" placeholder="Mật khẩu mới (ít nhất 8 ký tự)" />
+                                    <input type="password" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} className="w-full px-4 py-3 rounded-xl border-2 border-slate-200 font-semibold" placeholder="Nhập lại mật khẩu mới" />
+                                    <button disabled={busy === 'password'} onClick={changePassword} className="w-full bg-rose-600 text-white py-3 rounded-xl font-black disabled:opacity-50">ĐỔI MẬT KHẨU</button>
+                                </section>
+                            </div>
+
+                            {message && <div className="lg:col-span-2 bg-amber-50 border border-amber-200 text-amber-800 p-4 rounded-2xl font-bold text-center">{message}</div>}
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        const CloudLibrary = ({ setScreen, setSettings, setCloudId, onNewLesson }) => {
+            const [items, setItems] = useState([]);
+            const [loading, setLoading] = useState(true);
+            const [error, setError] = useState('');
+
+            const load = async () => {
+                setLoading(true);
+                setError('');
+                try {
+                    const result = await backendRequest('lessons.list');
+                    setItems(result.items || []);
+                } catch (err) {
+                    setError(err.message || 'Không tải được thư viện.');
+                } finally {
+                    setLoading(false);
+                }
+            };
+
+            useEffect(() => { load(); }, []);
+
+            const openItem = async (item) => {
+                try {
+                    const result = await backendRequest('lessons.get', { id: item.id });
+                    setSettings(result.item.data);
+                    setCloudId(result.item.id);
+                    setScreen('EDITOR');
+                } catch (err) {
+                    alert('Không mở được bài dạy: ' + err.message);
+                }
+            };
+
+            const removeItem = async (id) => {
+                if (!confirm('Xóa bài dạy này khỏi đám mây?')) return;
+                try {
+                    await backendRequest('lessons.delete', { id });
+                    load();
+                } catch (err) {
+                    alert('Không xóa được bài dạy: ' + err.message);
+                }
+            };
+
+            return (
+                <div className="w-full h-full bg-slate-50 flex flex-col">
+                    <div className="bg-indigo-700 text-white p-5 px-8 flex items-center justify-between shadow-lg">
+                        <div>
+                            <h2 className="text-3xl font-black uppercase">☁️ Bài dạy cloud</h2>
+                            <p className="text-indigo-200 text-sm font-semibold">Dữ liệu và media được xử lý qua backend</p>
+                        </div>
+                        <div className="flex gap-2">
+                            <button onClick={onNewLesson} className="bg-emerald-500 hover:bg-emerald-400 px-5 py-2 rounded-xl font-black">+ BÀI MỚI</button>
+                            <button onClick={() => setScreen('MENU')} className="bg-white/15 hover:bg-white/25 px-5 py-2 rounded-xl font-black">← TRANG CHỦ</button>
+                        </div>
+                    </div>
+                    <div className="flex-1 overflow-y-auto p-6">
+                        <div className="max-w-5xl mx-auto">
+                            {loading && <div className="text-center text-slate-500 font-bold py-16">Đang tải thư viện từ backend...</div>}
+                            {error && <div className="bg-red-50 border border-red-200 text-red-700 rounded-2xl p-5 font-bold">Không tải được dữ liệu: {error}</div>}
+                            {!loading && !error && items.length === 0 && <div className="text-center bg-white rounded-3xl border-2 border-dashed border-slate-200 p-16 text-slate-500"><div className="text-6xl mb-4">☁️</div><div className="text-xl font-black">Chưa có bài dạy nào trên cloud</div><div className="mt-2">Bấm “Bài mới” hoặc vào “Soạn bài”.</div></div>}
+                            <div className="grid md:grid-cols-2 gap-4">
+                                {items.map(item => (
+                                    <div key={item.id} className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 flex flex-col gap-4">
+                                        <div className="flex-1">
+                                            <div className="text-[10px] font-black text-indigo-500 uppercase mb-1">{item.subject_name || 'Chưa phân loại'}</div>
+                                            <h3 className="text-xl font-black text-slate-800">{item.title || 'Bài dạy chưa đặt tên'}</h3>
+                                            <p className="text-xs text-slate-400 font-bold mt-1">Cập nhật: {new Date(item.updated_at).toLocaleString('vi-VN')}</p>
+                                            <p className="text-sm text-slate-500 font-semibold mt-2">{item.question_count || 0} câu hỏi</p>
+                                        </div>
+                                        <div className="flex gap-2">
+                                            <button onClick={() => openItem(item)} className="flex-1 bg-indigo-600 text-white py-2.5 rounded-xl font-black">MỞ</button>
+                                            <button onClick={() => removeItem(item.id)} className="bg-red-50 text-red-600 border border-red-100 px-4 rounded-xl font-black">XÓA</button>
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        const GroupManager = ({ setScreen, user }) => {
+            const [groups, setGroups] = useState([]);
+            const [loading, setLoading] = useState(true);
+            const [error, setError] = useState('');
+            const [newGroupName, setNewGroupName] = useState('');
+            const [joinCode, setJoinCode] = useState('');
+            const [busy, setBusy] = useState(false);
+
+            const loadGroups = async () => {
+                setLoading(true);
+                setError('');
+                try {
+                    const result = await backendRequest('groups.list');
+                    setGroups(result.groups || []);
+                } catch (err) {
+                    setError(err.message || 'Không tải được nhóm.');
+                } finally {
+                    setLoading(false);
+                }
+            };
+
+            useEffect(() => { loadGroups(); }, []);
+
+            const createGroup = async () => {
+                const name = newGroupName.trim();
+                if (!name) return alert('Hãy nhập tên nhóm.');
+                setBusy(true);
+                try {
+                    await backendRequest('groups.create', { name });
+                    setNewGroupName('');
+                    await loadGroups();
+                } catch (err) {
+                    alert('Không tạo được nhóm: ' + err.message);
+                } finally {
+                    setBusy(false);
+                }
+            };
+
+            const joinGroup = async () => {
+                const code = joinCode.trim().toUpperCase();
+                if (!code) return alert('Hãy nhập mã nhóm.');
+                setBusy(true);
+                try {
+                    await backendRequest('groups.join', { code });
+                    setJoinCode('');
+                    await loadGroups();
+                } catch (err) {
+                    alert('Không tham gia được nhóm: ' + err.message);
+                } finally {
+                    setBusy(false);
+                }
+            };
+
+            const leaveOrDelete = async (group) => {
+                const isOwner = group.is_owner || group.owner_id === user.id;
+                if (!confirm(isOwner ? 'Xóa nhóm này? Câu đã chia sẻ sẽ chuyển về Riêng tư.' : 'Rời khỏi nhóm này?')) return;
+                try {
+                    await backendRequest(isOwner ? 'groups.delete' : 'groups.leave', { group_id: group.id });
+                    await loadGroups();
+                } catch (err) {
+                    alert(err.message);
+                }
+            };
+
+            const copyCode = async (code) => {
+                try {
+                    await navigator.clipboard.writeText(code);
+                    alert('Đã sao chép mã nhóm: ' + code);
+                } catch {
+                    prompt('Sao chép mã nhóm:', code);
+                }
+            };
+
+            return (
+                <div className="w-full h-full bg-slate-50 flex flex-col text-slate-800">
+                    <div className="bg-fuchsia-700 text-white px-8 py-5 flex items-center justify-between shadow-lg">
+                        <div>
+                            <h2 className="text-3xl font-black uppercase">👥 Nhóm chia sẻ</h2>
+                            <p className="text-fuchsia-200 text-sm font-semibold">Tạo nhóm riêng hoặc tham gia bằng mã nhóm</p>
+                        </div>
+                        <button onClick={() => setScreen('MENU')} className="bg-white/15 hover:bg-white/25 px-5 py-2 rounded-xl font-black">← TRANG CHỦ</button>
+                    </div>
+
+                    <div className="p-6 overflow-y-auto flex-1">
+                        <div className="max-w-5xl mx-auto space-y-6">
+                            <div className="grid md:grid-cols-2 gap-5">
+                                <div className="bg-white rounded-3xl border border-slate-200 p-6 shadow-sm">
+                                    <h3 className="text-lg font-black text-fuchsia-700 mb-3">Tạo nhóm mới</h3>
+                                    <p className="text-sm text-slate-500 font-semibold mb-4">Hệ thống sinh mã nhóm 8 ký tự ở backend.</p>
+                                    <div className="flex gap-2">
+                                        <input value={newGroupName} onChange={(e) => setNewGroupName(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && createGroup()} placeholder="Tên nhóm..." className="flex-1 px-4 py-3 rounded-xl border-2 border-slate-200 outline-none focus:border-fuchsia-400 font-bold" />
+                                        <button disabled={busy} onClick={createGroup} className="px-5 rounded-xl bg-fuchsia-600 text-white font-black disabled:opacity-50">TẠO</button>
+                                    </div>
+                                </div>
+
+                                <div className="bg-white rounded-3xl border border-slate-200 p-6 shadow-sm">
+                                    <h3 className="text-lg font-black text-indigo-700 mb-3">Tham gia bằng mã</h3>
+                                    <p className="text-sm text-slate-500 font-semibold mb-4">Nhập mã 8 ký tự do chủ nhóm gửi.</p>
+                                    <div className="flex gap-2">
+                                        <input value={joinCode} onChange={(e) => setJoinCode(e.target.value.toUpperCase())} onKeyDown={(e) => e.key === 'Enter' && joinGroup()} maxLength="8" placeholder="VD: A1B2C3D4" className="flex-1 px-4 py-3 rounded-xl border-2 border-slate-200 outline-none focus:border-indigo-400 font-black uppercase tracking-widest" />
+                                        <button disabled={busy} onClick={joinGroup} className="px-5 rounded-xl bg-indigo-600 text-white font-black disabled:opacity-50">THAM GIA</button>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div>
+                                <div className="flex items-center justify-between mb-3">
+                                    <h3 className="text-xl font-black">Nhóm của tôi</h3>
+                                    <span className="text-sm font-bold text-slate-400">{groups.length} nhóm</span>
+                                </div>
+                                {loading && <div className="text-center py-12 text-slate-500 font-bold">Đang tải nhóm...</div>}
+                                {error && <div className="bg-red-50 border border-red-200 text-red-700 rounded-2xl p-5 font-bold">Không tải được nhóm: {error}</div>}
+                                {!loading && !error && groups.length === 0 && (
+                                    <div className="bg-white border-2 border-dashed border-slate-200 rounded-3xl p-12 text-center text-slate-500">
+                                        <div className="text-5xl mb-3">👥</div>
+                                        <div className="font-black text-lg">Chưa tham gia nhóm nào</div>
+                                    </div>
+                                )}
+                                <div className="grid md:grid-cols-2 gap-4">
+                                    {groups.map(group => {
+                                        const isOwner = group.is_owner || group.owner_id === user.id;
+                                        return (
+                                            <div key={group.id} className="bg-white border border-slate-200 rounded-2xl p-5 shadow-sm">
+                                                <div className="flex items-start justify-between gap-3">
+                                                    <div>
+                                                        <div className="flex gap-2 items-center mb-1">
+                                                            <h4 className="text-lg font-black text-slate-800">{group.name}</h4>
+                                                            <span className={`text-[9px] font-black px-2 py-1 rounded-lg ${isOwner ? 'bg-fuchsia-50 text-fuchsia-700' : 'bg-indigo-50 text-indigo-700'}`}>{isOwner ? 'CHỦ NHÓM' : 'THÀNH VIÊN'}</span>
+                                                        </div>
+                                                        <div className="text-xs text-slate-400 font-bold">Mã nhóm</div>
+                                                        <div className="text-2xl font-black tracking-[0.18em] text-indigo-700 mt-1">{group.join_code}</div>
+                                                        <div className="text-xs font-bold text-slate-400 mt-2">{group.member_count || 1} thành viên</div>
+                                                    </div>
+                                                    <button onClick={() => copyCode(group.join_code)} className="bg-slate-100 hover:bg-slate-200 px-3 py-2 rounded-xl text-xs font-black">SAO CHÉP</button>
+                                                </div>
+                                                <button onClick={() => leaveOrDelete(group)} className="mt-5 w-full py-2.5 rounded-xl border border-red-100 bg-red-50 text-red-600 font-black text-xs uppercase">{isOwner ? 'Xóa nhóm' : 'Rời nhóm'}</button>
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        const QuestionBank = ({ setScreen, settings, setSettings, user }) => {
+            const [items, setItems] = useState([]);
+            const [groups, setGroups] = useState([]);
+            const [subjects, setSubjects] = useState([]);
+            const [lessons, setLessons] = useState([]);
+            const [loading, setLoading] = useState(true);
+            const [error, setError] = useState('');
+            const [subjectFilter, setSubjectFilter] = useState('ALL');
+            const [lessonFilter, setLessonFilter] = useState('ALL');
+            const [shareFilter, setShareFilter] = useState('ALL');
+            const [searchText, setSearchText] = useState('');
+            const [selected, setSelected] = useState(() => new Set());
+
+            const load = async () => {
+                setLoading(true);
+                setError('');
+                try {
+                    const [bankResult, groupResult] = await Promise.all([
+                        backendRequest('bank.list', {
+                            subject_name: subjectFilter,
+                            lesson_name: lessonFilter,
+                            source: shareFilter,
+                            search: searchText
+                        }),
+                        backendRequest('groups.list')
+                    ]);
+                    setItems(bankResult.items || []);
+                    setSubjects(bankResult.facets?.subjects || []);
+                    setLessons(bankResult.facets?.lessons || []);
+                    setGroups(groupResult.groups || []);
+                } catch (err) {
+                    setError(err.message || 'Không tải được kho câu hỏi.');
+                } finally {
+                    setLoading(false);
+                }
+            };
+
+            useEffect(() => {
+                const timer = setTimeout(() => load(), 180);
+                return () => clearTimeout(timer);
+            }, [subjectFilter, lessonFilter, shareFilter, searchText]);
+
+            const groupNames = useMemo(
+                () => Object.fromEntries(groups.map(group => [group.id, group.name])),
+                [groups]
+            );
+
+            useEffect(() => {
+                if (lessonFilter !== 'ALL' && lessons.length && !lessons.includes(lessonFilter)) {
+                    setLessonFilter('ALL');
+                }
+            }, [lessons, lessonFilter]);
+
+            const visibleItems = items;
+
+            const toggle = (id) => {
+                setSelected(prev => {
+                    const next = new Set(prev);
+                    if (next.has(id)) next.delete(id);
+                    else next.add(id);
+                    return next;
+                });
+            };
+
+            const toggleAllVisible = () => {
+                const ids = visibleItems.map(item => item.id);
+                const allSelected = ids.length > 0 && ids.every(id => selected.has(id));
+                setSelected(prev => {
+                    const next = new Set(prev);
+                    ids.forEach(id => allSelected ? next.delete(id) : next.add(id));
+                    return next;
+                });
+            };
+
+            const addSelectedToLesson = async () => {
+                const ids = [...selected];
+                if (!ids.length) return alert('Hãy chọn ít nhất một câu hỏi.');
+                try {
+                    const result = await backendRequest('bank.resolve', { ids });
+                    const imported = result.questions || [];
+                    setSettings({ ...settings, questions: [...settings.questions, ...imported] });
+                    alert(`Đã thêm ${imported.length} câu hỏi do backend xác thực vào bài đang soạn.`);
+                    setScreen('EDITOR');
+                } catch (err) {
+                    alert('Không lấy được câu hỏi: ' + err.message);
+                }
+            };
+
+            const ownSelectedIds = items
+                .filter(item => selected.has(item.id) && item.user_id === user.id)
+                .map(item => item.id);
+
+            const deleteSelected = async () => {
+                if (!ownSelectedIds.length) return alert('Không có câu hỏi do thầy/cô sở hữu trong phần đã chọn.');
+                if (!confirm(`Xóa ${ownSelectedIds.length} câu của thầy/cô khỏi kho?`)) return;
+                try {
+                    await backendRequest('bank.delete', { ids: ownSelectedIds });
+                    setSelected(prev => {
+                        const next = new Set(prev);
+                        ownSelectedIds.forEach(id => next.delete(id));
+                        return next;
+                    });
+                    load();
+                } catch (err) {
+                    alert('Không xóa được câu hỏi: ' + err.message);
+                }
+            };
+
+            const visibilityInfo = (item) => {
+                if (item.visibility === 'public') return { label: '🌐 Công khai', cls: 'bg-emerald-50 text-emerald-700' };
+                if (item.visibility === 'group') return { label: '👥 ' + (groupNames[item.group_id] || 'Nhóm riêng'), cls: 'bg-fuchsia-50 text-fuchsia-700' };
+                return { label: '🔒 Riêng tư', cls: 'bg-slate-100 text-slate-600' };
+            };
+
+            return (
+                <div className="w-full h-full bg-slate-50 flex flex-col text-slate-800 relative">
+                    <div className="bg-violet-700 text-white px-8 py-5 flex items-center justify-between shadow-lg">
+                        <div>
+                            <h2 className="text-3xl font-black uppercase">📚 Kho câu hỏi</h2>
+                            <p className="text-violet-200 text-sm font-semibold">Môn học → Bài học → Câu hỏi • Riêng tư / Công khai / Theo nhóm</p>
+                        </div>
+                        <div className="flex gap-2">
+                            <button onClick={() => setScreen('EDITOR')} className="bg-white/15 hover:bg-white/25 px-4 py-2 rounded-xl font-black">← SOẠN BÀI</button>
+                            <button onClick={() => setScreen('MENU')} className="bg-white/15 hover:bg-white/25 px-4 py-2 rounded-xl font-black">TRANG CHỦ</button>
+                        </div>
+                    </div>
+
+                    <div className="bg-white border-b border-slate-200 px-6 py-4">
+                        <div className="max-w-7xl mx-auto flex flex-wrap gap-3 items-center">
+                            <div className="text-sm font-black text-slate-600 mr-auto">
+                                Bài đang soạn: <span className="text-violet-700">{settings.subject || 'Chưa chọn môn'} / {settings.title || 'Chưa đặt tên bài'}</span>
+                            </div>
+                            <select value={subjectFilter} onChange={(e) => setSubjectFilter(e.target.value)} className="px-3 py-2 rounded-xl border border-slate-200 bg-slate-50 font-bold text-sm">
+                                <option value="ALL">Tất cả môn</option>
+                                {subjects.map(subject => <option key={subject} value={subject}>{subject}</option>)}
+                            </select>
+                            <select value={lessonFilter} onChange={(e) => setLessonFilter(e.target.value)} className="px-3 py-2 rounded-xl border border-slate-200 bg-slate-50 font-bold text-sm">
+                                <option value="ALL">Tất cả bài</option>
+                                {lessons.map(lesson => <option key={lesson} value={lesson}>{lesson}</option>)}
+                            </select>
+                            <select value={shareFilter} onChange={(e) => setShareFilter(e.target.value)} className="px-3 py-2 rounded-xl border border-slate-200 bg-slate-50 font-bold text-sm">
+                                <option value="ALL">Tất cả nguồn</option>
+                                <option value="MINE">Câu của tôi</option>
+                                <option value="PUBLIC">Công khai</option>
+                                <option value="GROUP">Nhóm chia sẻ</option>
+                            </select>
+                            <input value={searchText} onChange={(e) => setSearchText(e.target.value)} placeholder="Tìm nội dung..." className="w-56 max-w-full px-3 py-2 rounded-xl border border-slate-200 outline-none focus:border-violet-400 font-semibold text-sm" />
+                            <button onClick={toggleAllVisible} className="px-4 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 font-black text-sm">Chọn tất cả</button>
+                        </div>
+                    </div>
+
+                    <div className="flex-1 overflow-y-auto p-6">
+                        <div className="max-w-7xl mx-auto">
+                            {loading && <div className="text-center py-16 font-bold text-slate-500">Đang tải kho câu hỏi...</div>}
+                            {error && <div className="bg-red-50 border border-red-200 text-red-700 rounded-2xl p-5 font-bold">Không tải được kho câu hỏi: {error}<div className="text-xs mt-2">Backend chưa sẵn sàng. Hãy kiểm tra kết nối.</div></div>}
+                            {!loading && !error && visibleItems.length === 0 && (
+                                <div className="text-center bg-white rounded-3xl border-2 border-dashed border-slate-200 p-14 text-slate-500">
+                                    <div className="text-6xl mb-3">📭</div>
+                                    <div className="text-xl font-black">Chưa có câu hỏi phù hợp</div>
+                                    <p className="mt-2">Có thể thay đổi bộ lọc hoặc lưu câu hỏi mới từ màn hình soạn bài.</p>
+                                </div>
+                            )}
+
+                            <div className="space-y-3 pb-24">
+                                {visibleItems.map((item, idx) => {
+                                    const isSelected = selected.has(item.id);
+                                    const correct = item.question?.answers?.find(ans => ans.isCorrect);
+                                    const visibility = visibilityInfo(item);
+                                    const isMine = item.user_id === user.id;
+                                    return (
+                                        <button key={item.id} onClick={() => toggle(item.id)} className={`w-full text-left bg-white border-2 rounded-2xl p-4 shadow-sm transition-all ${isSelected ? 'border-violet-500 ring-4 ring-violet-100' : 'border-slate-100 hover:border-violet-200'}`}>
+                                            <div className="flex gap-4 items-start">
+                                                <div className={`w-7 h-7 rounded-lg border-2 flex items-center justify-center flex-shrink-0 font-black ${isSelected ? 'bg-violet-600 border-violet-600 text-white' : 'border-slate-300 text-transparent'}`}>✓</div>
+                                                <div className="flex-1 min-w-0">
+                                                    <div className="flex flex-wrap gap-2 items-center mb-2">
+                                                        <span className="bg-indigo-50 text-indigo-700 px-2 py-1 rounded-lg text-[10px] font-black uppercase">{item.subject_name || 'Chưa phân loại'}</span>
+                                                        <span className="bg-violet-50 text-violet-700 px-2 py-1 rounded-lg text-[10px] font-black uppercase">{item.lesson_name}</span>
+                                                        <span className={`px-2 py-1 rounded-lg text-[10px] font-black uppercase ${visibility.cls}`}>{visibility.label}</span>
+                                                        <span className={`px-2 py-1 rounded-lg text-[10px] font-black uppercase ${isMine ? 'bg-blue-50 text-blue-700' : 'bg-amber-50 text-amber-700'}`}>{isMine ? 'Câu của tôi' : 'Được chia sẻ'}</span>
+                                                        {item.question?.image && <span className="bg-cyan-50 text-cyan-700 px-2 py-1 rounded-lg text-[10px] font-black">🖼️ ẢNH</span>}
+                                                        {item.question?.audio?.data && <span className="bg-amber-50 text-amber-700 px-2 py-1 rounded-lg text-[10px] font-black">🔊 ÂM THANH</span>}
+                                                        <span className="text-[10px] text-slate-400 font-bold">#{idx + 1}</span>
+                                                    </div>
+                                                    <div className="text-base font-black text-slate-800">{item.question?.text || 'Câu hỏi không có nội dung'}</div>
+                                                    {correct && <div className="mt-2 text-xs font-bold text-emerald-600">Đáp án đúng: {correct.text}</div>}
+                                                </div>
+                                                {item.question?.image && <img src={mediaSrc(item.question.image)} className="w-20 h-20 object-contain rounded-xl border border-slate-100 bg-slate-50" />}
+                                            </div>
+                                        </button>
+                                    );
+                                })}
+                            </div>
+                        </div>
+                    </div>
+
+                    <div className="absolute bottom-0 left-0 right-0 bg-white/95 backdrop-blur border-t border-slate-200 px-6 py-4 shadow-2xl">
+                        <div className="max-w-7xl mx-auto flex items-center justify-between gap-4">
+                            <div className="font-black text-slate-600">Đã chọn: <span className="text-violet-700 text-xl">{selected.size}</span> câu</div>
+                            <div className="flex gap-3">
+                                <button onClick={deleteSelected} disabled={!ownSelectedIds.length} className="px-5 py-3 rounded-xl bg-red-50 text-red-600 border border-red-100 font-black disabled:opacity-40">Xóa câu của tôi ({ownSelectedIds.length})</button>
+                                <button onClick={addSelectedToLesson} disabled={!selected.size} className="px-7 py-3 rounded-xl bg-violet-600 text-white font-black shadow-lg disabled:opacity-40">+ Thêm {selected.size || ''} câu vào bài đang soạn</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
         const App = () => {
             const [screen, setScreen] = useState('MENU');
-            const [errorMsg, setErrorMsg] = useState(null);
             const [score, setScore] = useState(0);
+            const [session, setSession] = useState(null);
+            const [authReady, setAuthReady] = useState(false);
+            const [backendReady, setBackendReady] = useState(false);
+            const [backendError, setBackendError] = useState('');
+            const [cloudId, setCloudId] = useState(null);
+            const [emailRecoveryState, setEmailRecoveryState] = useState(() => new URLSearchParams(window.location.search).get('recovery_state') || '');
             
             const [settings, setSettings] = useState(() => {
-                try {
-                    const saved = localStorage.getItem(STORAGE_KEY);
-                    if (saved) return JSON.parse(saved);
-                } catch (e) { console.error("Load failed", e); }
                 return {
+                    subject: "Tin học",
+                    title: "Bài dạy AI Pose Quiz",
+                    bankVisibility: "private",
+                    bankGroupId: "",
                     timeLimit: 20,
                     checkInterval: 3,
                     numAnswers: 4,
@@ -90,6 +1014,7 @@
                             id: Date.now(),
                             text: "Em hãy tạo dáng 'Giơ tay trái' giống bạn nhỏ nhé!",
                             image: null,
+                            audio: { data: null, name: "" },
                             answers: [
                                 { text: "Giơ tay trái thật cao lên nhé", pose: "RAISE_LEFT", isCorrect: true, image: null },
                                 { text: "Giơ tay phải giống như chào", pose: "RAISE_RIGHT", isCorrect: false, image: null },
@@ -107,47 +1032,200 @@
             });
 
             useEffect(() => {
-                try {
-                    localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
-                } catch (e) {
-                    if (e.name === 'QuotaExceededError') {
-                        setErrorMsg("Bộ nhớ đầy! Hãy bấm 'Thiết lập' -> 'Lưu file' để lưu bài dạy ra máy tính.");
+                let active = true;
+                supabaseClient.auth.getSession().then(({ data }) => {
+                    if (!active) return;
+                    setSession(data.session || null);
+                    setAuthReady(true);
+                });
+                const { data: listener } = supabaseClient.auth.onAuthStateChange((event, nextSession) => {
+                    if (!active) return;
+                    setSession(nextSession || null);
+                    if (event === 'PASSWORD_RECOVERY') {
+                        const state = new URLSearchParams(window.location.search).get('recovery_state') || '';
+                        if (state) setEmailRecoveryState(state);
                     }
+                    setAuthReady(true);
+                });
+                return () => {
+                    active = false;
+                    listener?.subscription?.unsubscribe();
+                };
+            }, []);
+
+            useEffect(() => {
+                if (!session) {
+                    setBackendReady(false);
+                    setBackendError('');
+                    return;
                 }
-            }, [settings]);
+                let cancelled = false;
+                setBackendReady(false);
+                setBackendError('');
+                backendRequest('bootstrap')
+                    .then(() => { if (!cancelled) setBackendReady(true); })
+                    .catch((err) => { if (!cancelled) setBackendError(err.message || 'Không kết nối được backend.'); });
+                return () => { cancelled = true; };
+            }, [session?.access_token]);
 
             const storageUsage = useMemo(() => {
-                const str = JSON.stringify(settings);
-                return (str.length * 2) / (1024 * 1024);
+                const paths = new Set();
+                const walk = (value) => {
+                    if (Array.isArray(value)) return value.forEach(walk);
+                    if (!value || typeof value !== 'object') return;
+                    if (value.path) paths.add(value.path);
+                    Object.values(value).forEach(walk);
+                };
+                walk(settings);
+                return paths.size;
             }, [settings]);
+
+            const saveQuestionsToBank = async (questions) => {
+                const subjectName = (settings.subject || 'Chưa phân loại').trim() || 'Chưa phân loại';
+                const lessonName = (settings.title || 'Chưa phân loại').trim() || 'Chưa phân loại';
+                const visibility = ['private', 'public', 'group'].includes(settings.bankVisibility)
+                    ? settings.bankVisibility
+                    : 'private';
+                const groupId = visibility === 'group' ? (settings.bankGroupId || null) : null;
+
+                if (!questions?.length) return alert('Không có câu hỏi để lưu.');
+                if (visibility === 'group' && !groupId) return alert('Hãy chọn nhóm muốn chia sẻ.');
+
+                try {
+                    const result = await backendRequest('bank.save', {
+                        subject_name: subjectName,
+                        lesson_name: lessonName,
+                        visibility,
+                        group_id: groupId,
+                        questions,
+                        pose_assets: settings.poseAssets || {}
+                    });
+                    alert(`Đã lưu ${result.count || questions.length} câu vào kho qua backend.`);
+                } catch (err) {
+                    alert('Không lưu được vào kho câu hỏi: ' + err.message);
+                }
+            };
+
+            const saveToCloud = async () => {
+                try {
+                    const result = await backendRequest('lessons.save', {
+                        id: cloudId,
+                        subject_name: (settings.subject || 'Chưa phân loại').trim(),
+                        title: (settings.title || 'Bài dạy AI Pose Quiz').trim(),
+                        data: settings
+                    });
+                    setCloudId(result.item.id);
+                    setSettings(result.item.data);
+                    alert(cloudId ? 'Đã cập nhật bài dạy trên backend.' : 'Đã lưu bài dạy và toàn bộ media lên backend.');
+                } catch (err) {
+                    alert('Không lưu được bài dạy: ' + err.message);
+                }
+            };
+
+            const newLesson = () => {
+                setCloudId(null);
+                setSettings({
+                    subject: 'Tin học',
+                    title: 'Bài dạy mới',
+                    bankVisibility: 'private',
+                    bankGroupId: '',
+                    timeLimit: 20,
+                    checkInterval: 3,
+                    numAnswers: 4,
+                    poseAssets: { NONE: null, RAISE_LEFT: null, RAISE_RIGHT: null, BOTH_UP: null, CROSS_ARMS: null },
+                    questions: [{
+                        id: Date.now(),
+                        text: 'Nhập nội dung câu hỏi...',
+                        image: null,
+                        audio: { data: null, name: '' },
+                        answers: Array(4).fill(0).map((_, idx) => ({ text: `Đáp án ${idx + 1}`, pose: 'NONE', isCorrect: idx === 0, image: null }))
+                    }],
+                    audio: {
+                        correct: { data: null, name: '' },
+                        wrong: { data: null, name: '' },
+                        bgm: { data: null, name: '' }
+                    }
+                });
+                setScreen('EDITOR');
+            };
+
+            if (!authReady) {
+                return <div className="w-screen h-screen grid place-items-center bg-slate-950 text-white font-black text-xl">Đang kết nối Supabase...</div>;
+            }
+
+            if (emailRecoveryState) {
+                return <EmailRecoveryReset recoveryState={emailRecoveryState} onDone={() => {
+                    const clean = window.location.href.split(/[?#]/)[0];
+                    window.history.replaceState({}, '', clean);
+                    setEmailRecoveryState('');
+                    setSession(null);
+                }} />;
+            }
+
+            if (!session) return <AuthScreen />;
+
+            if (!backendReady) {
+                return (
+                    <div className="w-screen h-screen bg-slate-950 text-white grid place-items-center p-6 text-center">
+                        <div>
+                            <div className="text-6xl mb-4">⚙️</div>
+                            <div className="text-xl font-black">{backendError ? 'Không kết nối được backend' : 'Đang khởi tạo backend...'}</div>
+                            {backendError && <div className="mt-3 text-red-300 font-bold max-w-xl">{backendError}</div>}
+                            {backendError && <button onClick={() => window.location.reload()} className="mt-5 bg-indigo-600 px-5 py-2 rounded-xl font-black">THỬ LẠI</button>}
+                        </div>
+                    </div>
+                );
+            }
 
             return (
                 <div className="w-screen h-screen bg-white overflow-hidden select-none">
-                    {errorMsg && (
-                        <div className="fixed top-0 left-0 w-full bg-red-600 text-white p-2 text-center z-[100] font-bold shadow-xl">
-                            ⚠️ {errorMsg}
-                            <button onClick={() => setErrorMsg(null)} className="ml-4 bg-white/20 px-2 rounded">Đã hiểu</button>
-                        </div>
-                    )}
-                    {screen === 'MENU' && <MainMenu setScreen={setScreen} />}
+                    {screen === 'MENU' && <MainMenu setScreen={setScreen} user={session.user} onSignOut={() => supabaseClient.auth.signOut()} />}
                     {screen === 'GAME' && <Game settings={settings} setScreen={setScreen} setScore={setScore} />}
-                    {screen === 'EDITOR' && <Editor settings={settings} setSettings={setSettings} setScreen={setScreen} usage={storageUsage} />}
+                    {screen === 'EDITOR' && <Editor settings={settings} setSettings={setSettings} setScreen={setScreen} usage={storageUsage} onSaveCloud={saveToCloud} onOpenCloud={() => setScreen('CLOUD')} onOpenBank={() => setScreen('BANK')} onSaveQuestionsToBank={saveQuestionsToBank} onImported={() => setCloudId(null)} cloudId={cloudId} />}
+                    {screen === 'CLOUD' && <CloudLibrary setScreen={setScreen} setSettings={setSettings} setCloudId={setCloudId} onNewLesson={newLesson} />}
+                    {screen === 'BANK' && <QuestionBank setScreen={setScreen} settings={settings} setSettings={setSettings} user={session.user} />}
+                    {screen === 'GROUPS' && <GroupManager setScreen={setScreen} user={session.user} />}
+                    {screen === 'ACCOUNT' && <AccountPage setScreen={setScreen} />}
                     {screen === 'RESULT' && <Result score={score} total={settings.questions.length} setScreen={setScreen} />}
                 </div>
             );
         };
 
-        const MainMenu = ({ setScreen }) => (
-            <div className="w-full h-full flex flex-col items-center justify-center bg-gradient-to-br from-indigo-600 to-purple-700 text-white p-4 text-center">
-                <div className="mb-6 text-9xl animate-bounce drop-shadow-2xl">🙋‍♂️</div>
-                <h1 className="text-7xl font-black mb-2 tracking-tighter uppercase">AI POSE QUIZ</h1>
-                <p className="text-white/80 text-2xl mb-10 italic">Học vui cùng trí tuệ nhân tạo - V9.9</p>
-                <div className="flex flex-col gap-4 w-80">
-                    <button onClick={() => setScreen('GAME')} className="bg-green-500 hover:bg-green-400 py-5 rounded-2xl text-3xl font-black shadow-xl transition-all active:scale-95 uppercase">Bắt đầu</button>
-                    <button onClick={() => setScreen('EDITOR')} className="bg-white/10 hover:bg-white/20 py-4 rounded-2xl text-xl font-bold backdrop-blur-md border border-white/30 transition-all uppercase">Thiết lập bài dạy</button>
+        const MainMenu = ({ setScreen, user, onSignOut }) => {
+            const [profile, setProfile] = useState(null);
+            useEffect(() => {
+                backendRequest('account.profile.get').then((r) => setProfile(r.profile)).catch(() => {});
+            }, []);
+            return (
+                <div className="w-full h-full flex flex-col items-center justify-center bg-gradient-to-br from-indigo-600 to-purple-700 text-white p-4 text-center relative">
+                    <div className="absolute top-5 right-6 flex items-center gap-3 bg-white/10 border border-white/20 rounded-2xl px-4 py-2 backdrop-blur">
+                        <button onClick={() => setScreen('ACCOUNT')} className="flex items-center gap-2 text-left">
+                            <div className="w-9 h-9 rounded-full bg-white/20 overflow-hidden grid place-items-center">
+                                {profile?.avatar_url ? <img src={profile.avatar_url} className="w-full h-full object-cover" /> : '👤'}
+                            </div>
+                            <div className="hidden sm:block">
+                                <div className="text-xs font-black max-w-48 truncate">{profile?.display_name || user?.email}</div>
+                                {profile?.school_name && <div className="text-[9px] text-white/60 max-w-48 truncate">{profile.school_name}</div>}
+                            </div>
+                        </button>
+                        <button onClick={onSignOut} className="text-xs font-black bg-white/15 hover:bg-white/25 px-3 py-1.5 rounded-lg">ĐĂNG XUẤT</button>
+                    </div>
+                    <div className="mb-4 text-8xl animate-bounce drop-shadow-2xl">🙋‍♂️</div>
+                    <h1 className="text-6xl font-black mb-2 tracking-tighter uppercase">AI POSE QUIZ</h1>
+                    <p className="text-white/80 text-xl mb-7 italic">Học vui cùng trí tuệ nhân tạo - V9.9 Cloud</p>
+                    <div className="flex flex-col gap-3 w-[34rem] max-w-full">
+                        <button onClick={() => setScreen('GAME')} className="bg-green-500 hover:bg-green-400 py-4 rounded-2xl text-2xl font-black shadow-xl transition-all active:scale-95 uppercase">Bắt đầu</button>
+                        <div className="grid grid-cols-2 gap-3">
+                            <button onClick={() => setScreen('EDITOR')} className="bg-white/10 hover:bg-white/20 py-3.5 rounded-2xl text-base font-black backdrop-blur-md border border-white/30 transition-all uppercase">✏️ Soạn bài</button>
+                            <button onClick={() => setScreen('BANK')} className="bg-violet-500/90 hover:bg-violet-400 py-3.5 rounded-2xl text-base font-black shadow-lg transition-all uppercase">📚 Kho câu hỏi</button>
+                            <button onClick={() => setScreen('GROUPS')} className="bg-fuchsia-500/90 hover:bg-fuchsia-400 py-3.5 rounded-2xl text-base font-black shadow-lg transition-all uppercase">👥 Nhóm chia sẻ</button>
+                            <button onClick={() => setScreen('CLOUD')} className="bg-sky-500/90 hover:bg-sky-400 py-3.5 rounded-2xl text-base font-black shadow-lg transition-all uppercase">☁️ Bài dạy cloud</button>
+                            <button onClick={() => setScreen('ACCOUNT')} className="col-span-2 bg-slate-900/60 hover:bg-slate-900/80 py-3.5 rounded-2xl text-base font-black border border-white/20 transition-all uppercase">👤 Tài khoản của tôi</button>
+                        </div>
+                    </div>
                 </div>
-            </div>
-        );
+            );
+        };
 
         const Game = ({ settings, setScreen, setScore }) => {
             const [qIndex, setQIndex] = useState(0);
@@ -157,102 +1235,185 @@
             const [feedback, setFeedback] = useState(null);
             const [correctCount, setCorrectCount] = useState(0);
             const [isMuted, setIsMuted] = useState(false);
+            const [gameToken, setGameToken] = useState(null);
+            const [gameReady, setGameReady] = useState(false);
+            const [gameError, setGameError] = useState('');
+            const checkInFlightRef = useRef(false);
             
             const videoRef = useRef(null);
             const canvasRef = useRef(null);
             const poseRef = useRef(null);
             const cameraRef = useRef(null);
             const bgmRef = useRef(null);
+            const questionAudioRef = useRef(null);
             const isMounted = useRef(true);
 
             const currentQuestion = settings.questions[qIndex];
 
             const getPoseVisual = (poseId) => {
-                if (settings.poseAssets?.[poseId]) {
-                    return <img src={settings.poseAssets[poseId]} className="w-full h-full object-contain" />;
+                if (mediaSrc(settings.poseAssets?.[poseId])) {
+                    return <img src={mediaSrc(settings.poseAssets[poseId])} className="w-full h-full object-contain" />;
                 }
                 return <span className="text-4xl">{DEFAULT_POSE_CONFIG[poseId]?.icon || '❓'}</span>;
             };
 
-            const checkAnswer = useCallback(() => {
-                if (feedback) return;
-                const correctAns = currentQuestion.answers.find(a => a.isCorrect);
-                const isCorrect = detectedPose === (correctAns?.pose || 'NONE');
-                
-                // Kích hoạt phản hồi
-                setFeedback(isCorrect ? 'correct' : 'wrong');
-                let newCorrectCount = correctCount;
-                if (isCorrect) {
-                    newCorrectCount = correctCount + 1;
-                    setCorrectCount(newCorrectCount);
-                }
+            useEffect(() => {
+                let cancelled = false;
+                setGameReady(false);
+                setGameError('');
+                backendRequest('game.start', { data: settings })
+                    .then((result) => {
+                        if (cancelled) return;
+                        setGameToken(result.game_token);
+                        setQIndex(result.index || 0);
+                        setCorrectCount(result.score || 0);
+                        setGameReady(true);
+                    })
+                    .catch((err) => {
+                        if (!cancelled) setGameError(err.message || 'Không tạo được phiên chơi.');
+                    });
+                return () => { cancelled = true; };
+            }, []);
 
-                const audioSrc = isCorrect ? settings.audio.correct?.data : settings.audio.wrong?.data;
-                if (audioSrc && !isMuted) new Audio(audioSrc).play().catch(() => {});
+            const checkAnswer = useCallback(async () => {
+                if (feedback || !gameReady || !gameToken || checkInFlightRef.current) return;
+                checkInFlightRef.current = true;
+                try {
+                    const result = await backendRequest('game.check', {
+                        game_token: gameToken,
+                        detected_pose: detectedPose
+                    });
 
-                setTimeout(() => {
-                    if (!isMounted.current) return;
-                    if (qIndex < settings.questions.length - 1) {
-                        setQIndex(qIndex + 1);
-                        setTimeLeft(settings.timeLimit);
-                        setCheckTimer(settings.checkInterval || 3);
-                        setFeedback(null);
-                    } else {
-                        setScore(newCorrectCount);
-                        setScreen('RESULT');
+                    const isCorrect = result.feedback === 'correct';
+                    setFeedback(result.feedback);
+                    setCorrectCount(result.score || 0);
+
+                    if (questionAudioRef.current) {
+                        questionAudioRef.current.pause();
+                        questionAudioRef.current.currentTime = 0;
                     }
-                }, 1500);
-            }, [feedback, currentQuestion, detectedPose, correctCount, isMuted, qIndex, settings, setScore, setScreen]);
+                    const audioSrc = mediaSrc(isCorrect ? settings.audio.correct?.data : settings.audio.wrong?.data);
+                    if (audioSrc && !isMuted) new Audio(audioSrc).play().catch(() => {});
+
+                    setTimeout(() => {
+                        if (!isMounted.current) return;
+                        if (result.finished) {
+                            setScore(result.score || 0);
+                            setScreen('RESULT');
+                        } else {
+                            setGameToken(result.game_token);
+                            setQIndex(result.next_index);
+                            setTimeLeft(settings.timeLimit);
+                            setCheckTimer(settings.checkInterval || 3);
+                            setFeedback(null);
+                            checkInFlightRef.current = false;
+                        }
+                    }, 1500);
+                } catch (err) {
+                    checkInFlightRef.current = false;
+                    alert('Backend không chấm được câu hỏi: ' + err.message);
+                }
+            }, [feedback, gameReady, gameToken, detectedPose, isMuted, settings, setScore, setScreen]);
 
             // Hàm xử lý khi nhấn nút Kiểm tra
             const handleManualCheck = () => {
-                if (feedback) return;
-                setTimeLeft(0); // Đưa thời gian về 0 như thầy yêu cầu
-                // checkAnswer sẽ được gọi tự động bởi useEffect khi timeLeft === 0
+                if (feedback || !gameReady || checkInFlightRef.current) return;
+                setTimeLeft(0);
             };
 
             useEffect(() => {
+                if (bgmRef.current) {
+                    bgmRef.current.pause();
+                    bgmRef.current = null;
+                }
                 if (settings.audio.bgm?.data && !isMuted) {
-                    if (bgmRef.current) bgmRef.current.pause();
-                    bgmRef.current = new Audio(settings.audio.bgm.data);
+                    bgmRef.current = new Audio(mediaSrc(settings.audio.bgm.data));
                     bgmRef.current.loop = true;
                     bgmRef.current.volume = 0.3;
                     bgmRef.current.play().catch(() => {});
                 }
-                return () => { if (bgmRef.current) bgmRef.current.pause(); };
-            }, [isMuted, qIndex, settings.audio.bgm]);
+                return () => {
+                    if (bgmRef.current) {
+                        bgmRef.current.pause();
+                        bgmRef.current = null;
+                    }
+                };
+            }, [isMuted, settings.audio.bgm?.data]);
 
             useEffect(() => {
+                if (questionAudioRef.current) {
+                    questionAudioRef.current.pause();
+                    questionAudioRef.current = null;
+                }
+                const questionAudio = mediaSrc(currentQuestion?.audio?.data);
+                if (questionAudio && !isMuted && !feedback) {
+                    questionAudioRef.current = new Audio(questionAudio);
+                    questionAudioRef.current.volume = 1;
+                    questionAudioRef.current.play().catch(() => {});
+                }
+                return () => {
+                    if (questionAudioRef.current) {
+                        questionAudioRef.current.pause();
+                        questionAudioRef.current = null;
+                    }
+                };
+            }, [qIndex, currentQuestion?.audio?.data, isMuted]);
+
+            useEffect(() => {
+                if (!gameReady) return;
+                const videoElement = videoRef.current;
+                if (!videoElement) return;
+
                 isMounted.current = true;
                 const initPose = async () => {
-                    poseRef.current = new Pose({ 
-                        locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}` 
-                    });
-                    poseRef.current.setOptions({ modelComplexity: 1, smoothLandmarks: true, minDetectionConfidence: 0.5, minTrackingConfidence: 0.5 });
-                    poseRef.current.onResults((results) => {
-                        if (!isMounted.current || !canvasRef.current) return;
-                        const canvasCtx = canvasRef.current.getContext('2d');
-                        canvasCtx.save();
-                        canvasCtx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
-                        if (results.poseLandmarks) {
-                            drawConnectors(canvasCtx, results.poseLandmarks, POSE_CONNECTIONS, {color: '#6366f1', lineWidth: 3});
-                            drawLandmarks(canvasCtx, results.poseLandmarks, { color: '#f43f5e', lineWidth: 1, radius: 3 });
-                            setDetectedPose(analyzePose(results.poseLandmarks));
-                        }
-                        canvasCtx.restore();
-                    });
-                    cameraRef.current = new Camera(videoRef.current, {
-                        onFrame: async () => { if (isMounted.current && poseRef.current) await poseRef.current.send({image: videoRef.current}); },
-                        width: 640, height: 480
-                    });
-                    cameraRef.current.start();
+                    try {
+                        poseRef.current = new Pose({ 
+                            locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}` 
+                        });
+                        poseRef.current.setOptions({ modelComplexity: 1, smoothLandmarks: true, minDetectionConfidence: 0.5, minTrackingConfidence: 0.5 });
+                        poseRef.current.onResults((results) => {
+                            if (!isMounted.current || !canvasRef.current) return;
+                            const canvasCtx = canvasRef.current.getContext('2d');
+                            canvasCtx.save();
+                            canvasCtx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
+                            if (results.poseLandmarks) {
+                                drawConnectors(canvasCtx, results.poseLandmarks, POSE_CONNECTIONS, {color: '#6366f1', lineWidth: 3});
+                                drawLandmarks(canvasCtx, results.poseLandmarks, { color: '#f43f5e', lineWidth: 1, radius: 3 });
+                                setDetectedPose(analyzePose(results.poseLandmarks));
+                            }
+                            canvasCtx.restore();
+                        });
+                        if (!isMounted.current) return;
+                        cameraRef.current = new Camera(videoElement, {
+                            onFrame: async () => {
+                                if (isMounted.current && poseRef.current && videoRef.current) {
+                                    await poseRef.current.send({image: videoRef.current});
+                                }
+                            },
+                            width: 640, height: 480
+                        });
+                        await cameraRef.current.start();
+                        if (!isMounted.current && cameraRef.current) cameraRef.current.stop();
+                    } catch (err) {
+                        if (isMounted.current) console.warn('Camera/Pose init failed:', err);
+                    }
                 };
                 initPose();
-                return () => { isMounted.current = false; if (cameraRef.current) cameraRef.current.stop(); if (poseRef.current) poseRef.current.close(); };
-            }, []);
+                return () => {
+                    isMounted.current = false;
+                    if (cameraRef.current) {
+                        try { cameraRef.current.stop(); } catch (_) {}
+                        cameraRef.current = null;
+                    }
+                    if (poseRef.current) {
+                        try { poseRef.current.close(); } catch (_) {}
+                        poseRef.current = null;
+                    }
+                };
+            }, [gameReady]);
 
             useEffect(() => {
-                if (feedback) return;
+                if (!gameReady || gameError || feedback) return;
                 if (timeLeft <= 0) { checkAnswer(); return; }
                 const timer = setInterval(() => setTimeLeft(prev => prev - 1), 1000);
                 const intervalTimer = setInterval(() => {
@@ -262,7 +1423,20 @@
                     });
                 }, 1000);
                 return () => { clearInterval(timer); clearInterval(intervalTimer); };
-            }, [timeLeft, feedback, checkTimer, checkAnswer, settings.checkInterval]);
+            }, [timeLeft, feedback, checkTimer, checkAnswer, settings.checkInterval, gameReady, gameError]);
+
+            if (!gameReady) {
+                return (
+                    <div className="w-full h-full bg-slate-950 text-white grid place-items-center p-6 text-center">
+                        <div>
+                            <div className="text-6xl mb-4">{gameError ? '⚠️' : '🎮'}</div>
+                            <div className="text-2xl font-black">{gameError ? 'Không thể bắt đầu bài chơi' : 'Đang tạo phiên chơi trên backend...'}</div>
+                            {gameError && <div className="mt-3 text-red-300 font-bold max-w-xl">{gameError}</div>}
+                            <button onClick={() => setScreen('MENU')} className="mt-6 bg-indigo-600 hover:bg-indigo-500 px-6 py-3 rounded-xl font-black">← TRANG CHỦ</button>
+                        </div>
+                    </div>
+                );
+            }
 
             return (
                 <div className="w-full h-full flex flex-col bg-slate-100 overflow-hidden">
@@ -290,7 +1464,7 @@
                                 <h2 className="text-3xl font-black text-slate-800 mb-4 text-center leading-tight">{currentQuestion.text}</h2>
                                 {currentQuestion.image ? (
                                     <div className="flex-1 w-full flex items-center justify-center overflow-hidden">
-                                        <img src={currentQuestion.image} className="max-w-full max-h-full object-contain rounded-3xl shadow-2xl border-4 border-white" alt="Câu hỏi" />
+                                        <img src={mediaSrc(currentQuestion.image)} className="max-w-full max-h-full object-contain rounded-3xl shadow-2xl border-4 border-white" alt="Câu hỏi" />
                                     </div>
                                 ) : (
                                     <div className="w-64 h-64 flex items-center justify-center character-bounce">
@@ -307,7 +1481,7 @@
                                             <span className="text-lg font-bold text-slate-700 leading-tight block line-clamp-2">{ans.text}</span>
                                         </div>
                                         <div className="flex-shrink-0 w-20 h-20 flex items-center justify-center bg-white rounded-2xl overflow-hidden border-2 border-slate-100 shadow-inner">
-                                            {ans.image ? <img src={ans.image} className="w-full h-full object-contain" /> : getPoseVisual(ans.pose)}
+                                            {ans.image ? <img src={mediaSrc(ans.image)} className="w-full h-full object-contain" /> : getPoseVisual(ans.pose)}
                                         </div>
                                     </div>
                                 ))}
@@ -352,16 +1526,27 @@
             );
         };
 
-        const Editor = ({ settings, setSettings, setScreen, usage }) => {
+        const Editor = ({ settings, setSettings, setScreen, usage, onSaveCloud, onOpenCloud, onOpenBank, onSaveQuestionsToBank, onImported, cloudId }) => {
             const [qIdx, setQIdx] = useState(0);
+            const [shareGroups, setShareGroups] = useState([]);
             const q = settings.questions[qIdx] || settings.questions[0];
 
-            const handleFile = (e, callback) => {
+            useEffect(() => {
+                backendRequest('groups.list')
+                    .then((result) => setShareGroups(result.groups || []))
+                    .catch(() => setShareGroups([]));
+            }, []);
+
+            const handleFile = async (e, callback) => {
                 const file = e.target.files[0];
-                if (file) { 
-                    const reader = new FileReader(); 
-                    reader.onload = (ev) => callback(ev.target.result, file.name); 
-                    reader.readAsDataURL(file); 
+                if (!file) return;
+                try {
+                    const result = await backendRequest('media.upload', {}, file);
+                    callback(result.asset, file.name);
+                } catch (err) {
+                    alert('Không tải được media: ' + err.message);
+                } finally {
+                    e.target.value = '';
                 }
             };
 
@@ -377,40 +1562,54 @@
                 setSettings({ ...settings, questions: nq });
             };
 
-            const exportData = () => {
-                const dataStr = JSON.stringify(settings);
-                const dataUri = 'data:application/json;charset=utf-8,'+ encodeURIComponent(dataStr);
-                const a = document.createElement('a');
-                a.setAttribute('href', dataUri);
-                a.setAttribute('download', `ai_pose_quiz_${new Date().getTime()}.json`);
-                a.click();
+            const exportData = async () => {
+                try {
+                    const result = await backendRequest('document.export', { data: settings });
+                    const blob = new Blob([JSON.stringify(result.data, null, 2)], { type: 'application/json;charset=utf-8' });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = `ai_pose_quiz_${Date.now()}.json`;
+                    a.click();
+                    URL.revokeObjectURL(url);
+                } catch (err) {
+                    alert('Không xuất được dữ liệu: ' + err.message);
+                }
             };
 
-            const importData = (e) => {
+            const importData = async (e) => {
                 const file = e.target.files[0];
                 if (!file) return;
-                const reader = new FileReader();
-                reader.onload = (ev) => {
-                    try { 
-                        const data = JSON.parse(ev.target.result);
-                        setSettings(data); 
-                        alert("Đã nhập dữ liệu bài dạy thành công!"); 
-                    } catch (err) { alert("File không hợp lệ!"); }
-                };
-                reader.readAsText(file);
+                try {
+                    const result = await backendRequest('document.import', {}, file);
+                    setSettings(result.data);
+                    onImported?.();
+                    alert('Đã nhập dữ liệu qua backend thành công.');
+                } catch (err) {
+                    alert('Không nhập được file: ' + err.message);
+                } finally {
+                    e.target.value = '';
+                }
             };
 
             return (
                 <div className="w-full h-full flex flex-col bg-slate-50 text-slate-800">
                     <div className="bg-white border-b-2 border-slate-200 p-4 flex justify-between items-center px-8 shadow-sm">
                         <div className="flex flex-col">
-                            <h2 className="text-2xl font-black text-indigo-600 uppercase tracking-tighter">THIẾT LẬP BÀI DẠY V9.9</h2>
+                            <h2 className="text-2xl font-black text-indigo-600 uppercase tracking-tighter">THIẾT LẬP BÀI DẠY V9.9 CLOUD</h2>
+                            <div className="flex gap-2 mt-1">
+                                <input value={settings.subject || ''} onChange={(e) => setSettings({...settings, subject: e.target.value})} placeholder="Môn học (VD: Tin học)" className="w-48 max-w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-1 text-sm font-bold outline-none focus:border-indigo-300" />
+                                <input value={settings.title || ''} onChange={(e) => setSettings({...settings, title: e.target.value})} placeholder="Tên bài dạy" className="w-80 max-w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-1 text-sm font-bold outline-none focus:border-indigo-300" />
+                            </div>
                             <div className="flex items-center gap-2 mt-1">
-                                <div className="w-32 h-2 bg-slate-200 rounded-full overflow-hidden"><div className={`h-full ${usage > 4.5 ? 'bg-red-500' : 'bg-green-500'}`} style={{width: `${Math.min(100, (usage/5)*100)}%`}}></div></div>
-                                <span className="text-[10px] font-bold text-slate-400">Dung lượng: {usage.toFixed(2)} / 5 MB</span>
+                                <span className="text-[10px] font-bold text-emerald-600">☁️ {usage} media đang tham chiếu • Storage riêng tư</span>
                             </div>
                         </div>
-                        <div className="flex gap-2">
+                        <div className="flex gap-2 flex-wrap justify-end">
+                            <button onClick={onOpenBank} className="bg-violet-600 text-white px-4 py-2 rounded-xl font-bold text-xs uppercase hover:bg-violet-700 shadow-md">📚 Kho câu hỏi</button>
+                            <button onClick={() => setScreen('GROUPS')} className="bg-fuchsia-600 text-white px-4 py-2 rounded-xl font-bold text-xs uppercase hover:bg-fuchsia-700 shadow-md">👥 Nhóm</button>
+                            <button onClick={onOpenCloud} className="bg-sky-500 text-white px-4 py-2 rounded-xl font-bold text-xs uppercase hover:bg-sky-600 shadow-md">☁️ Thư viện</button>
+                            <button onClick={onSaveCloud} className="bg-emerald-600 text-white px-4 py-2 rounded-xl font-bold text-xs uppercase hover:bg-emerald-700 shadow-md">{cloudId ? 'Cập nhật cloud' : 'Lưu cloud'}</button>
                             <button onClick={exportData} className="bg-blue-500 text-white px-4 py-2 rounded-xl font-bold text-xs uppercase hover:bg-blue-600 shadow-md">Lưu file (.json)</button>
                             <label className="bg-orange-500 text-white px-4 py-2 rounded-xl font-bold text-xs uppercase cursor-pointer flex items-center hover:bg-orange-600 shadow-md">
                                 Mở file
@@ -441,7 +1640,7 @@
                                         <div key={poseId} className="flex items-center gap-3 p-2 bg-slate-50 rounded-xl border border-slate-100">
                                             <div className="w-10 h-10 bg-white rounded-lg flex items-center justify-center overflow-hidden border border-slate-200 flex-shrink-0">
                                                 {settings.poseAssets[poseId] ? (
-                                                    <img src={settings.poseAssets[poseId]} className="w-full h-full object-contain" />
+                                                    <img src={mediaSrc(settings.poseAssets[poseId])} className="w-full h-full object-contain" />
                                                 ) : (
                                                     <span className="text-xl">{DEFAULT_POSE_CONFIG[poseId].icon}</span>
                                                 )}
@@ -473,6 +1672,12 @@
                                                 {settings.audio[type]?.name ? settings.audio[type].name : '+ Chọn file'}
                                                 <input type="file" accept="audio/*" className="absolute inset-0 opacity-0 cursor-pointer" onChange={(e) => handleFile(e, (data, name) => setSettings({...settings, audio: {...settings.audio, [type]: {data, name}}}))} />
                                             </div>
+                                            {settings.audio[type]?.data && (
+                                                <div className="flex gap-2 mt-1">
+                                                    <button type="button" onClick={() => new Audio(mediaSrc(settings.audio[type].data)).play().catch(() => {})} className="text-[8px] font-black text-indigo-500 uppercase">▶ Nghe thử</button>
+                                                    <button type="button" onClick={() => setSettings({...settings, audio: {...settings.audio, [type]: {data: null, name: ""}}})} className="text-[8px] font-black text-red-500 uppercase">Xóa</button>
+                                                </div>
+                                            )}
                                         </div>
                                     ))}
                                 </div>
@@ -484,7 +1689,24 @@
                                     {settings.questions.map((_, i) => (
                                         <button key={i} onClick={() => setQIdx(i)} className={`w-full p-3 rounded-xl font-black text-xs transition-all ${qIdx === i ? 'bg-indigo-600 text-white shadow-lg' : 'bg-slate-50 text-slate-500'}`}>CÂU HỎI {i + 1}</button>
                                     ))}
-                                    <button onClick={() => setSettings({...settings, questions: [...settings.questions, { id: Date.now(), text: "Em hãy tạo dáng mới nào!", answers: Array(4).fill(0).map((_, idx) => ({ text: `Đáp án ${idx + 1}`, pose: "NONE", isCorrect: idx === 0, image: null })) }]})} className="p-3 border-2 border-dashed border-indigo-200 text-indigo-600 rounded-xl font-black text-xs hover:bg-indigo-50">+ Thêm câu</button>
+                                    <button onClick={() => setSettings({...settings, questions: [...settings.questions, { id: Date.now(), text: "Em hãy tạo dáng mới nào!", image: null, audio: { data: null, name: "" }, answers: Array(4).fill(0).map((_, idx) => ({ text: `Đáp án ${idx + 1}`, pose: "NONE", isCorrect: idx === 0, image: null })) }]})} className="p-3 border-2 border-dashed border-indigo-200 text-indigo-600 rounded-xl font-black text-xs hover:bg-indigo-50">+ Thêm câu</button>
+                                    <div className="grid grid-cols-1 gap-2 pt-2 border-t border-slate-100">
+                                        <div className="text-[9px] font-black text-slate-400 uppercase tracking-widest mt-1">Chế độ lưu vào kho</div>
+                                        <select value={settings.bankVisibility || 'private'} onChange={(e) => setSettings({...settings, bankVisibility: e.target.value, bankGroupId: e.target.value === 'group' ? (settings.bankGroupId || '') : ''})} className="w-full p-2 bg-slate-50 border border-slate-200 rounded-xl text-[10px] font-black outline-none">
+                                            <option value="private">🔒 Riêng tư — chỉ tôi</option>
+                                            <option value="public">🌐 Công khai — mọi tài khoản</option>
+                                            <option value="group">👥 Theo nhóm riêng</option>
+                                        </select>
+                                        {(settings.bankVisibility || 'private') === 'group' && (
+                                            <select value={settings.bankGroupId || ''} onChange={(e) => setSettings({...settings, bankGroupId: e.target.value})} className="w-full p-2 bg-fuchsia-50 border border-fuchsia-100 text-fuchsia-700 rounded-xl text-[10px] font-black outline-none">
+                                                <option value="">-- Chọn nhóm chia sẻ --</option>
+                                                {shareGroups.map(group => <option key={group.id} value={group.id}>{group.name} ({group.join_code})</option>)}
+                                            </select>
+                                        )}
+                                        <button disabled={!q} onClick={() => q && onSaveQuestionsToBank([q])} className="p-2.5 bg-violet-50 text-violet-700 border border-violet-100 rounded-xl font-black text-[10px] uppercase disabled:opacity-40">Lưu câu này vào kho</button>
+                                        <button onClick={() => onSaveQuestionsToBank(settings.questions)} className="p-2.5 bg-violet-600 text-white rounded-xl font-black text-[10px] uppercase shadow-sm">Lưu tất cả vào kho</button>
+                                        <button onClick={onOpenBank} className="p-2.5 bg-white text-violet-700 border-2 border-violet-200 rounded-xl font-black text-[10px] uppercase">Mở kho để lấy nhiều câu</button>
+                                    </div>
                                 </div>
                             </section>
                         </div>
@@ -496,12 +1718,24 @@
                                         <div className="flex-1">
                                             <label className="text-xs font-black text-slate-400 uppercase block mb-1 tracking-widest">Câu hỏi</label>
                                             <textarea value={q.text} onChange={(e) => updateQuestion({text: e.target.value})} className="w-full border-2 border-slate-50 p-4 rounded-[1.5rem] text-xl font-black bg-slate-50 outline-none focus:border-indigo-300 min-h-[100px]" />
+                                            <div className="mt-3 flex items-center gap-2">
+                                                <label className="relative flex-1 bg-amber-50 border-2 border-dashed border-amber-200 text-amber-700 rounded-xl px-4 py-2.5 font-black text-xs cursor-pointer text-center overflow-hidden">
+                                                    {q.audio?.name ? `🔊 ${q.audio.name}` : '🔊 Thêm âm thanh cho câu hỏi'}
+                                                    <input type="file" accept="audio/*" className="absolute inset-0 opacity-0 cursor-pointer" onChange={(e) => handleFile(e, (data, name) => updateQuestion({audio: {data, name}}))} />
+                                                </label>
+                                                {q.audio?.data && (
+                                                    <>
+                                                        <button type="button" onClick={() => new Audio(mediaSrc(q.audio.data)).play().catch(() => {})} className="px-3 py-2.5 rounded-xl bg-amber-500 text-white font-black text-xs">▶ NGHE</button>
+                                                        <button type="button" onClick={() => updateQuestion({audio: {data: null, name: ""}})} className="px-3 py-2.5 rounded-xl bg-red-50 border border-red-100 text-red-600 font-black text-xs">XÓA</button>
+                                                    </>
+                                                )}
+                                            </div>
                                         </div>
                                         <div className="w-40 flex flex-col gap-2">
                                             <label className="text-xs font-black text-slate-400 uppercase block tracking-widest text-center">Ảnh minh họa</label>
                                             <div className="relative aspect-square bg-slate-50 rounded-2xl border-2 border-dashed border-slate-200 overflow-hidden flex flex-col items-center justify-center">
-                                                {q.image ? <><img src={q.image} className="w-full h-full object-contain" /><button onClick={() => updateQuestion({image: null})} className="absolute top-1 right-1 bg-red-500 text-white w-6 h-6 rounded-full flex items-center justify-center font-bold shadow-lg">✕</button></> : <span className="text-2xl opacity-30 font-black">🖼️</span>}
-                                                <input type="file" accept="image/*" className="absolute inset-0 opacity-0 cursor-pointer" onChange={(e) => handleFile(e, (data) => updateQuestion({image: data}))} />
+                                                {q.image ? <><img src={mediaSrc(q.image)} className="w-full h-full object-contain" /><button type="button" onClick={() => updateQuestion({image: null})} className="absolute top-1 right-1 z-20 bg-red-500 text-white w-6 h-6 rounded-full flex items-center justify-center font-bold shadow-lg">✕</button></> : <span className="text-2xl opacity-30 font-black">🖼️</span>}
+                                                <input type="file" accept="image/*" className="absolute inset-0 z-10 opacity-0 cursor-pointer" onChange={(e) => handleFile(e, (data) => updateQuestion({image: data}))} />
                                             </div>
                                         </div>
                                     </div>
@@ -524,10 +1758,13 @@
                                                             {ans.image ? '📎 Đổi ảnh' : '📸 Thêm ảnh riêng'}
                                                             <input type="file" accept="image/*" className="absolute inset-0 opacity-0 cursor-pointer" onChange={(e) => handleFile(e, (data) => updateAnswer(idx, {image: data}))} />
                                                         </div>
+                                                        {ans.image && (
+                                                            <button type="button" onClick={() => updateAnswer(idx, {image: null})} className="w-full text-[8px] font-black text-red-500 uppercase">Xóa ảnh đáp án</button>
+                                                        )}
                                                     </div>
                                                     <div className="w-16 h-16 bg-white rounded-xl border border-slate-100 flex items-center justify-center overflow-hidden relative shadow-inner">
-                                                        {ans.image ? <img src={ans.image} className="w-full h-full object-contain" /> : (
-                                                            settings.poseAssets[ans.pose] ? <img src={settings.poseAssets[ans.pose]} className="w-full h-full object-contain" /> : <span className="text-2xl">{DEFAULT_POSE_CONFIG[ans.pose]?.icon}</span>
+                                                        {ans.image ? <img src={mediaSrc(ans.image)} className="w-full h-full object-contain" /> : (
+                                                            settings.poseAssets[ans.pose] ? <img src={mediaSrc(settings.poseAssets[ans.pose])} className="w-full h-full object-contain" /> : <span className="text-2xl">{DEFAULT_POSE_CONFIG[ans.pose]?.icon}</span>
                                                         )}
                                                     </div>
                                                 </div>

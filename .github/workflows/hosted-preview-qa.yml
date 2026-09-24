@@ -1,0 +1,50 @@
+name: Hosted Preview QA
+
+on:
+  push:
+    branches:
+      - supabase-auth-cloud
+    paths:
+      - 'qa/hosted-smoke.mjs'
+      - '.github/workflows/hosted-preview-qa.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  hosted-preview:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Install Playwright Chromium
+        run: |
+          npm install --no-save playwright@1.55.0
+          npx playwright install --with-deps chromium
+
+      - name: Verify immutable preview files
+        run: |
+          curl --fail-with-body -sS https://rawcdn.githack.com/huunsbk/tracnghiemtaodang/3f452f3cb5633a55826460513711ad1ef54da02b/index.html -o preview.html
+          grep -q "AI POSE QUIZ" preview.html
+          curl --fail-with-body -sS https://rawcdn.githack.com/huunsbk/tracnghiemtaodang/3f452f3cb5633a55826460513711ad1ef54da02b/supabase-config.js -o preview-config.js
+          grep -q "exfnarddchxzfewlztwb.supabase.co" preview-config.js
+
+      - name: Run hosted browser smoke
+        env:
+          APP_URL: https://rawcdn.githack.com/huunsbk/tracnghiemtaodang/3f452f3cb5633a55826460513711ad1ef54da02b/index.html
+        run: node qa/hosted-smoke.mjs
+
+      - name: Upload hosted screenshot
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hosted-preview-qa
+          path: hosted-preview-pass.png
+          if-no-files-found: ignore
+          retention-days: 7
