@@ -863,11 +863,24 @@ async function handleAction(action: string, body: any, user: any, req: Request) 
     const newPassword = String(body.new_password || "");
     if (newPassword.length < 8) throw Object.assign(new Error("Mật khẩu mới cần ít nhất 8 ký tự."), { status: 400 });
     if (currentPassword === newPassword) throw Object.assign(new Error("Mật khẩu mới phải khác mật khẩu hiện tại."), { status: 400 });
-    await authUserRequest(req, "user", {
-      email: user.email,
-      current_password: currentPassword,
+    const email = String(user.email || "").trim();
+    if (!email) throw Object.assign(new Error("Tài khoản chưa có email để xác minh mật khẩu hiện tại."), { status: 400 });
+
+    const verifier = createClient(supabaseUrl, getPublicKey(), {
+      auth: { persistSession: false, autoRefreshToken: false },
+    });
+    const { error: verifyError } = await verifier.auth.signInWithPassword({
+      email,
+      password: currentPassword,
+    });
+    if (verifyError) {
+      throw Object.assign(new Error("Mật khẩu hiện tại không đúng."), { status: 403 });
+    }
+
+    const { error: updateError } = await admin.auth.admin.updateUserById(userId, {
       password: newPassword,
     });
+    if (updateError) throw updateError;
     return { ok: true, message: "Đã đổi mật khẩu." };
   }
 
