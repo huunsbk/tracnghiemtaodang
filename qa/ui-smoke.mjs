@@ -98,6 +98,7 @@ const pageErrors = [];
 page.on('pageerror', e => pageErrors.push(String(e)));
 page.on('dialog', async d => { await d.accept(); });
 
+let qaTokenCounter = 0;
 const session = {
   access_token: 'qa-access-token',
   token_type: 'bearer',
@@ -122,7 +123,14 @@ await page.route(SUPABASE_HOST + '/auth/v1/**', async route => {
   const url = route.request().url();
   if (url.includes('/logout')) return route.fulfill({ status: 204, body: '' });
   if (url.includes('/token')) {
-    return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(session) });
+    qaTokenCounter += 1;
+    const freshSession = {
+      ...session,
+      access_token: 'qa-access-token-' + qaTokenCounter,
+      refresh_token: 'qa-refresh-token-' + qaTokenCounter,
+      expires_at: Math.floor(Date.now()/1000)+3600
+    };
+    return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(freshSession) });
   }
   if (url.includes('/user')) {
     return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(session.user) });
@@ -577,10 +585,12 @@ await check('Account password change signs out and new login path remains usable
   await byButton('ĐỔI MẬT KHẨU').click();
   await page.getByRole('button', { name: 'ĐĂNG NHẬP', exact: true }).first().waitFor();
 
-  await page.locator('input[type=email]').fill('qa@example.com');
-  await page.locator('input[type=password]').fill('QaChanged123!');
+  const reloginEmail = page.locator('input[type=email]:visible').first();
+  const reloginPassword = page.locator('input[type=password]:visible').first();
+  await reloginEmail.fill('qa@example.com');
+  await reloginPassword.fill('QaChanged123!');
   await page.getByRole('button', { name: 'ĐĂNG NHẬP', exact: true }).last().click();
-  await byButton('BẮT ĐẦU').waitFor();
+  await byButton('BẮT ĐẦU').waitFor({ timeout: 30000 });
 });
 
 await check('Logout returns to auth screen', async () => {
