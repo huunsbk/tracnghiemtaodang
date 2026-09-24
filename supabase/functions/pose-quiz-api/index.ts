@@ -1,12 +1,13 @@
 import { createClient } from "npm:@supabase/supabase-js@2.116.0";
-import * as XLSX from "npm:xlsx@0.18.5";
+import ExcelJS from "npm:exceljs@4.4.0";
+import { Buffer } from "node:buffer";
 
 const BUCKET = "pose-quiz-media";
 const MAX_MEDIA_BYTES = 20 * 1024 * 1024;
 const MAX_IMPORT_FILE_BYTES = 8 * 1024 * 1024;
 const MAX_IMPORT_QUESTIONS = 500;
 const SIGNED_URL_TTL = 60 * 60;
-const SCHEMA_VERSION = "2026-09-24-import-theme-v1";
+const SCHEMA_VERSION = "2026-09-24-import-theme-secure-excel-v1";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -613,19 +614,30 @@ async function parseExcelQuestions(file: File, mapping: Record<string, string>) 
     throw Object.assign(new Error("File Excel vượt quá giới hạn 8 MB."), { status: 413 });
   }
   const ext = String(file.name || "").toLowerCase().split(".").pop();
-  if (!["xlsx", "xls"].includes(ext || "")) {
-    throw Object.assign(new Error("Chỉ hỗ trợ Excel .xlsx/.xls. Với Word, hãy sao chép nội dung rồi dùng Dán nhanh."), { status: 415 });
+  if (ext !== "xlsx") {
+    throw Object.assign(new Error("Chỉ hỗ trợ Excel .xlsx. Với .xls hoặc Word, hãy sao chép nội dung rồi dùng Dán nhanh."), { status: 415 });
   }
+
   const bytes = new Uint8Array(await file.arrayBuffer());
-  const workbook = XLSX.read(bytes, { type: "array", cellDates: false });
-  const firstSheet = workbook.SheetNames[0];
-  if (!firstSheet) throw Object.assign(new Error("File Excel không có trang tính."), { status: 400 });
-  const rows = XLSX.utils.sheet_to_json(workbook.Sheets[firstSheet], {
-    header: 1,
-    raw: false,
-    defval: "",
-    blankrows: false,
-  }) as unknown[][];
+  const workbook = new ExcelJS.Workbook();
+  try {
+    await workbook.xlsx.load(Buffer.from(bytes));
+  } catch (_) {
+    throw Object.assign(new Error("File Excel .xlsx không hợp lệ hoặc bị hỏng."), { status: 400 });
+  }
+
+  const sheet = workbook.worksheets[0];
+  if (!sheet) throw Object.assign(new Error("File Excel không có trang tính."), { status: 400 });
+
+  const rows: unknown[][] = [];
+  sheet.eachRow({ includeEmpty: false }, (row) => {
+    const values: string[] = [];
+    for (let col = 1; col <= 8; col++) {
+      const cell = row.getCell(col);
+      values.push(String(cell.text ?? "").trim());
+    }
+    if (values.some((value) => value !== "")) rows.push(values);
+  });
   return parseImportRows(rows, mapping);
 }
 
