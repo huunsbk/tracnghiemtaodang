@@ -1,0 +1,38 @@
+name: Pose Import Backend QA
+
+on:
+  push:
+    branches:
+      - supabase-auth-cloud
+    paths:
+      - '.github/workflows/pose-import-backend-qa.yml'
+      - 'supabase/functions/pose-quiz-api/**'
+      - 'supabase/functions/pose-quiz-qa/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run real backend integration QA
+        run: |
+          OIDC_RESPONSE=$(curl -fsS             -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN"             "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=pose-quiz-qa")
+          OIDC_TOKEN=$(printf '%s' "$OIDC_RESPONSE" | jq -r '.value')
+          test -n "$OIDC_TOKEN"
+          curl --fail-with-body -sS             -X POST             -H "Authorization: Bearer $OIDC_TOKEN"             "https://exfnarddchxzfewlztwb.supabase.co/functions/v1/pose-quiz-qa"             -o qa-backend-report.json
+          cat qa-backend-report.json
+          jq -e '.ok == true and ([.report[].ok] | all)' qa-backend-report.json >/dev/null
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pose-import-backend-report
+          path: qa-backend-report.json
+          if-no-files-found: ignore
+          retention-days: 7
