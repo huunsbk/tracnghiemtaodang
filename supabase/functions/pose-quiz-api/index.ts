@@ -452,7 +452,7 @@ function buildImportItem(
   const errors: string[] = [];
   if (!question) errors.push("Thiếu nội dung câu hỏi.");
   answers.forEach((answer, idx) => {
-    if (!answer) errors.push(\`Thiếu đáp án \${String.fromCharCode(65 + idx)}.\`);
+    if (!answer) errors.push(`Thiếu đáp án ${String.fromCharCode(65 + idx)}.`);
   });
   const correctLetter = normalizeCorrectAnswer(correctRaw, answers);
   if (!correctLetter) errors.push("Đáp án đúng phải là A, B, C, D, 1–4 hoặc đúng nội dung một đáp án.");
@@ -465,7 +465,7 @@ function buildImportItem(
     answers: answers.map((text, idx) => {
       const letter = String.fromCharCode(65 + idx);
       return {
-        text: text || \`Đáp án \${letter}\`,
+        text: text || `Đáp án ${letter}`,
         pose: mapping[letter] || DEFAULT_IMPORT_MAPPING[letter],
         isCorrect: letter === correctLetter,
         image: null,
@@ -529,7 +529,7 @@ function parseImportRows(rowsInput: unknown[][], mapping: Record<string, string>
   }
 
   if (rows.length - start > MAX_IMPORT_QUESTIONS) {
-    errors.push(\`Chỉ đọc tối đa \${MAX_IMPORT_QUESTIONS} câu trong một lần nhập.\`);
+    errors.push(`Chỉ đọc tối đa ${MAX_IMPORT_QUESTIONS} câu trong một lần nhập.`);
   }
   return { items, errors };
 }
@@ -594,7 +594,7 @@ function parseWordLikeText(text: string, mapping: Record<string, string>) {
   );
   const errors: string[] = [];
   if (!items.length) errors.push("Không nhận diện được câu hỏi. Hãy dùng mẫu Câu 1, A., B., C., D., Đáp án: B.");
-  if (records.length > MAX_IMPORT_QUESTIONS) errors.push(\`Chỉ đọc tối đa \${MAX_IMPORT_QUESTIONS} câu trong một lần nhập.\`);
+  if (records.length > MAX_IMPORT_QUESTIONS) errors.push(`Chỉ đọc tối đa ${MAX_IMPORT_QUESTIONS} câu trong một lần nhập.`);
   return { items, errors };
 }
 
